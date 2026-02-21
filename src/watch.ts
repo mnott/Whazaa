@@ -551,7 +551,7 @@ end tell`;
  * If so, focuses that tab instead of opening a duplicate.
  * Otherwise, opens a new iTerm2 tab, cds to the given path, and starts `claude`.
  */
-function handleRelocate(targetPath: string): void {
+function handleRelocate(targetPath: string): string | null {
   process.stderr.write(`[whazaa-watch] /relocate -> ${targetPath}\n`);
 
   // Expand ~ manually so the AppleScript shell command resolves it correctly
@@ -583,10 +583,9 @@ end tell`;
     const focusResult = runAppleScript(focusScript);
     if (focusResult === "focused") {
       process.stderr.write(`[whazaa-watch] /relocate: focused existing session ${existingSession} in ${targetPath}\n`);
-    } else {
-      process.stderr.write(`[whazaa-watch] /relocate: session ${existingSession} vanished, opening new tab\n`);
+      return existingSession;
     }
-    if (focusResult === "focused") return;
+    process.stderr.write(`[whazaa-watch] /relocate: session ${existingSession} vanished, opening new tab\n`);
   }
 
   // No existing session — open a new tab
@@ -597,15 +596,19 @@ end tell`;
 tell application "iTerm2"
   if (count of windows) = 0 then
     set newWindow to (create window with default profile)
-    tell current session of current tab of newWindow
+    set newSession to current session of current tab of newWindow
+    tell newSession
       write text "cd \\"${escapedPath}\\" && claude"
     end tell
+    return id of newSession
   else
     tell current window
       set newTab to (create tab with default profile)
-      tell current session of newTab
+      set newSession to current session of newTab
+      tell newSession
         write text "cd \\"${escapedPath}\\" && claude"
       end tell
+      return id of newSession
     end tell
   end if
 end tell`;
@@ -613,9 +616,10 @@ end tell`;
   const result = runAppleScript(script);
   if (result === null) {
     process.stderr.write("[whazaa-watch] /relocate: failed to open new iTerm2 tab\n");
-  } else {
-    process.stderr.write(`[whazaa-watch] /relocate: opened new tab in ${targetPath}\n`);
+    return null;
   }
+  process.stderr.write(`[whazaa-watch] /relocate: opened new tab in ${targetPath} (session ${result})\n`);
+  return result;
 }
 
 // --- Main loop ---------------------------------------------------------------
@@ -675,7 +679,11 @@ export async function watch(rawSessionId?: string): Promise<void> {
     if (text.startsWith("/relocate ")) {
       const targetPath = text.slice("/relocate ".length).trim();
       if (targetPath) {
-        handleRelocate(targetPath);
+        const newSessionId = handleRelocate(targetPath);
+        if (newSessionId) {
+          activeSessionId = newSessionId;
+          process.stderr.write(`[whazaa-watch] Active session switched to ${newSessionId}\n`);
+        }
         return;
       }
       process.stderr.write("[whazaa-watch] /relocate: no path provided\n");
