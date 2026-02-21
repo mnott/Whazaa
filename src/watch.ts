@@ -1,19 +1,25 @@
 /**
- * watch.ts — Terminal watcher for Claude Code integration
+ * watch.ts — Smart terminal watcher for Claude Code integration
  *
  * Monitors the Whazaa incoming message log and types new messages
- * into a specific iTerm2 (or Terminal.app) session via osascript.
+ * into an iTerm2 session running Claude Code.
+ *
+ * Smart session resolution (in order):
+ *   1. Try the specified session ID (from /whatsapp on)
+ *   2. If gone, find any iTerm2 session running claude
+ *   3. If none, open a new iTerm2 tab, start claude, use that
  *
  * Usage:  npx whazaa watch <session-id>
  *
  * Environment variables:
  *   WHAZAA_LOG            Path to incoming message log (default: /tmp/whazaa-incoming.log)
  *   WHAZAA_POLL_INTERVAL  Seconds between checks (default: 2)
- *   WHAZAA_PREFIX         Message prefix (default: [WhatsApp])
+ *   WHAZAA_PREFIX         Message prefix (default: empty)
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 
 // --- Configuration -----------------------------------------------------------
 
@@ -30,18 +36,30 @@ function resolveConfig(sessionId: string): WatchConfig {
     logFile: process.env.WHAZAA_LOG || "/tmp/whazaa-incoming.log",
     pollInterval:
       (parseInt(process.env.WHAZAA_POLL_INTERVAL || "2", 10) || 2) * 1_000,
-    prefix: process.env.WHAZAA_PREFIX || "[WhatsApp]",
+    prefix: process.env.WHAZAA_PREFIX || "",
   };
 }
 
 // --- Terminal adapters -------------------------------------------------------
 
 /**
- * Type text into an iTerm2 session and press Enter.
- * Uses AppleScript via stdin to avoid shell escaping issues.
+ * Run an AppleScript and return its stdout, or null on failure.
  */
-function typeIntoIterm(sessionId: string, text: string): boolean {
-  // Escape for AppleScript string literal (backslash then double-quote)
+function runAppleScript(script: string): string | null {
+  const result = spawnSync("osascript", [], {
+    input: script,
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 10_000,
+  });
+  if (result.status !== 0) return null;
+  return result.stdout?.toString().trim() ?? null;
+}
+
+/**
+ * Type text into a specific iTerm2 session and press Enter.
+ * Returns true if the session was found and text was typed.
+ */
+function typeIntoSession(sessionId: string, text: string): boolean {
   const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
   const script = `
@@ -57,51 +75,149 @@ tell application "iTerm2"
       end repeat
     end repeat
   end repeat
-  return "session not found"
+  return "not_found"
 end tell`;
 
-  const result = spawnSync("osascript", [], {
-    input: script,
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 5_000,
-  });
+  const result = runAppleScript(script);
+  return result === "ok";
+}
 
-  const stdout = result.stdout?.toString().trim() ?? "";
-  if (stdout === "session not found") {
-    process.stderr.write(
-      `[whazaa-watch] Session ${sessionId} not found in iTerm2\n`
-    );
-    return false;
+/**
+ * Search all iTerm2 sessions for one whose name contains "claude" (case-insensitive).
+ * The session name typically reflects the running process or tab title.
+ * Returns the session ID if found, null otherwise.
+ */
+function findClaudeSession(): string | null {
+  // Get all sessions as "id\tname" lines
+  const script = `
+tell application "iTerm2"
+  set output to ""
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        set sessionId to id of aSession
+        set sessionName to name of aSession
+        set output to output & sessionId & tab & sessionName & linefeed
+      end repeat
+    end repeat
+  end repeat
+  return output
+end tell`;
+
+  const result = runAppleScript(script);
+  if (!result) return null;
+
+  const lines = result.split("\n").filter(Boolean);
+  for (const line of lines) {
+    const tabIdx = line.indexOf("\t");
+    if (tabIdx < 0) continue;
+
+    const id = line.substring(0, tabIdx);
+    const name = line.substring(tabIdx + 1).toLowerCase();
+
+    // Match common Claude Code indicators in the tab title
+    if (
+      name.includes("claude") ||
+      name.includes("pai ready") ||
+      name.includes("pai ") // PAI hooks set tab titles like "PAI Ready", "PAI Systems"
+    ) {
+      process.stderr.write(
+        `[whazaa-watch] Found claude session: ${id} ("${line.substring(tabIdx + 1)}")\n`
+      );
+      return id;
+    }
   }
-  if (result.status !== 0) {
-    const err = result.stderr?.toString().trim() ?? "unknown error";
-    process.stderr.write(`[whazaa-watch] osascript error: ${err}\n`);
-    return false;
+
+  return null;
+}
+
+/**
+ * Check if iTerm2 is running.
+ */
+function isItermRunning(): boolean {
+  const result = spawnSync("pgrep", ["-x", "iTerm2"], {
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 3_000,
+  });
+  return result.status === 0;
+}
+
+/**
+ * Create a new iTerm2 tab, cd to home, run `claude`, and return the new session ID.
+ *
+ * The `claude` command is executed via the shell, so it resolves whatever the user
+ * has configured — alias, function, or PATH binary. No hardcoded paths.
+ *
+ * Returns the session ID of the new tab, or null on failure.
+ */
+function createClaudeSession(): string | null {
+  const home = homedir();
+
+  // If iTerm2 isn't running, launch it first
+  if (!isItermRunning()) {
+    process.stderr.write("[whazaa-watch] iTerm2 not running, launching...\n");
+    spawnSync("open", ["-a", "iTerm"], { timeout: 10_000 });
+    // Wait for iTerm2 to be ready
+    for (let i = 0; i < 10; i++) {
+      spawnSync("sleep", ["1"]);
+      if (isItermRunning()) break;
+    }
   }
-  return true;
+
+  // Create new tab and get its session ID
+  const createScript = `
+tell application "iTerm2"
+  tell current window
+    set newTab to (create tab with default profile)
+    tell current session of newTab
+      write text "cd ${home}"
+      delay 0.5
+      write text "claude"
+      return id
+    end tell
+  end tell
+end tell`;
+
+  const sessionId = runAppleScript(createScript);
+  if (!sessionId) {
+    process.stderr.write("[whazaa-watch] Failed to create new iTerm2 tab\n");
+    return null;
+  }
+
+  process.stderr.write(
+    `[whazaa-watch] Created new claude session: ${sessionId}\n`
+  );
+
+  // Wait for Claude Code to start up (it takes a few seconds)
+  process.stderr.write("[whazaa-watch] Waiting for Claude Code to start...\n");
+  spawnSync("sleep", ["8"]);
+
+  return sessionId;
 }
 
 // --- Main loop ---------------------------------------------------------------
 
 export async function watch(rawSessionId: string): Promise<void> {
   // Strip the iTerm2 prefix (e.g. "w1t1p0:GUID" → "GUID")
-  const sessionId = rawSessionId.includes(":")
+  let activeSessionId = rawSessionId.includes(":")
     ? rawSessionId.split(":").pop()!
     : rawSessionId;
 
-  const config = resolveConfig(sessionId);
+  const config = resolveConfig(activeSessionId);
 
   // Ensure log file exists and is empty
   writeFileSync(config.logFile, "");
 
   console.log(`Whazaa Watch`);
-  console.log(`  Session:  ${config.sessionId}`);
+  console.log(`  Session:  ${activeSessionId}`);
   console.log(`  Log file: ${config.logFile}`);
   console.log(`  Interval: ${config.pollInterval / 1_000}s`);
-  console.log(`  Prefix:   ${config.prefix}`);
+  console.log(`  Prefix:   ${config.prefix || "(none)"}`);
+  console.log(`  Mode:     Smart (auto-find/create claude sessions)`);
   console.log(`\nWaiting for messages...\n`);
 
   let seen = 0;
+  let consecutiveFailures = 0;
 
   // Graceful shutdown
   const cleanup = (signal: string) => {
@@ -110,6 +226,57 @@ export async function watch(rawSessionId: string): Promise<void> {
   };
   process.on("SIGINT", () => cleanup("SIGINT"));
   process.on("SIGTERM", () => cleanup("SIGTERM"));
+
+  /**
+   * Smart delivery: try to type into a session, with fallback chain.
+   *   1. Try active session
+   *   2. Find any claude session
+   *   3. Create new claude session
+   */
+  function deliverMessage(text: string): boolean {
+    // Attempt 1: try current active session
+    if (typeIntoSession(activeSessionId, text)) {
+      consecutiveFailures = 0;
+      return true;
+    }
+
+    process.stderr.write(
+      `[whazaa-watch] Session ${activeSessionId} not found. Searching for claude...\n`
+    );
+
+    // Attempt 2: find any existing claude session
+    const found = findClaudeSession();
+    if (found) {
+      activeSessionId = found;
+      process.stderr.write(
+        `[whazaa-watch] Retargeted to session: ${activeSessionId}\n`
+      );
+      if (typeIntoSession(activeSessionId, text)) {
+        consecutiveFailures = 0;
+        return true;
+      }
+    }
+
+    // Attempt 3: create a new claude session
+    process.stderr.write(
+      "[whazaa-watch] No claude session found. Starting new one...\n"
+    );
+    const created = createClaudeSession();
+    if (created) {
+      activeSessionId = created;
+      if (typeIntoSession(activeSessionId, text)) {
+        consecutiveFailures = 0;
+        return true;
+      }
+    }
+
+    // All attempts failed
+    consecutiveFailures++;
+    process.stderr.write(
+      `[whazaa-watch] Failed to deliver message (attempt ${consecutiveFailures})\n`
+    );
+    return false;
+  }
 
   // Poll loop
   setInterval(() => {
@@ -132,13 +299,8 @@ export async function watch(rawSessionId: string): Promise<void> {
       if (!msg) continue;
 
       console.log(`[whazaa-watch] → ${msg}`);
-      const sent = typeIntoIterm(
-        config.sessionId,
-        `${config.prefix} ${msg}`
-      );
-      if (!sent) {
-        console.log("[whazaa-watch] Failed to type into session");
-      }
+      const text = config.prefix ? `${config.prefix} ${msg}` : msg;
+      deliverMessage(text);
     }
 
     seen = lines.length;
