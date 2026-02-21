@@ -75,7 +75,7 @@ The `watch` command bridges WhatsApp messages directly into a Claude Code termin
 2. The watcher polls the log for new lines (every 2 seconds)
 3. The watcher resolves the target iTerm2 session (see below)
 4. New messages are typed into that session via `osascript`
-5. Messages arrive prefixed with `WHAZAA_PREFIX` so Claude knows the source
+5. Claude Code processes them as regular user input
 
 ### Session resolution
 
@@ -88,25 +88,9 @@ The watcher uses a fallback chain to find a usable iTerm2 session:
 
 This means the watcher can recover automatically if you close and reopen your Claude Code tab, or if it was started before iTerm2 was fully ready.
 
-### Starting the watcher
+### Managing the watcher
 
-From within Claude Code (recommended — Claude can restart it if it crashes):
-
-```bash
-node /path/to/whazaa/dist/index.js watch "$ITERM_SESSION_ID"
-```
-
-Or from a separate terminal:
-
-```bash
-npx whazaa watch <session-id>
-```
-
-The session ID is available as `$ITERM_SESSION_ID` in any iTerm2 shell. The `w1t1p0:` prefix is automatically stripped — you can pass the full value or just the UUID.
-
-### Persistent watcher (launchd)
-
-For a watcher that survives terminal closure and Claude Code `/clear`, run it as a macOS launchd agent using the control script at `scripts/watcher-ctl.sh`:
+Claude Code manages the watcher automatically — when you say "listen on WhatsApp" or use `/whatsapp on`, it starts the watcher as a macOS launchd agent targeting the current iTerm2 session. The control script is at `scripts/watcher-ctl.sh`:
 
 ```bash
 scripts/watcher-ctl.sh start    # Install and start as launchd agent
@@ -116,27 +100,12 @@ scripts/watcher-ctl.sh status   # Show whether the agent is running
 
 The launchd agent is configured with `KeepAlive: true`, so macOS automatically restarts the watcher if it crashes. It also uses `ProcessType: Interactive` and `LimitLoadToSessionType: Aqua`, which gives the agent access to the macOS GUI session. This is required because AppleScript needs a GUI context to control iTerm2 — without it, `osascript` calls from a launchd background agent would fail silently or be refused by the system.
 
-### Configuring Claude to reply on WhatsApp
-
-When the watcher types a message into your terminal, Claude sees it as regular user input prefixed with `[WhatsApp]`. By default, Claude won't know to reply on WhatsApp unless you tell it.
-
-Add this to your project's `CLAUDE.md` (or `~/.claude/CLAUDE.md` for global config):
-
-```markdown
-## WhatsApp Integration
-
-When you receive user input prefixed with `[WhatsApp]`, the message is from the user's
-phone via WhatsApp. Always respond via the `whatsapp_send` MCP tool in addition to the
-terminal so the user sees your reply on their phone.
-```
-
 ### Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WHAZAA_LOG` | `/tmp/whazaa-incoming.log` | Path to the incoming message log file |
 | `WHAZAA_POLL_INTERVAL` | `2` | Seconds between file checks |
-| `WHAZAA_PREFIX` | `` | Prefix added to messages typed into the terminal (empty by default) |
 
 ---
 
@@ -246,7 +215,6 @@ When a new MCP server starts, it automatically finds and kills any existing Whaz
 | `WHAZAA_AUTH_DIR` | `~/.whazaa/auth/` | Directory for WhatsApp session credentials |
 | `WHAZAA_LOG` | `/tmp/whazaa-incoming.log` | Incoming message log file (used by `watch`) |
 | `WHAZAA_POLL_INTERVAL` | `2` | Watcher poll interval in seconds |
-| `WHAZAA_PREFIX` | `` | Prefix for messages typed into terminal (empty by default) |
 
 ---
 
