@@ -298,12 +298,7 @@ Pattern: `/relocate <path>` or `/r <path>`
 
 1. `listClaudeSessions()` — return all sessions whose tab name contains "claude"
 2. Send a numbered list to WhatsApp via `watcherSendMessage`
-3. Store the list in `pendingSessionList`
-
-On next message:
-- Number 1-N: focus the chosen session, update `activeSessionId`
-- `0`, `cancel`, `c`, `back`: cancel
-- Anything else: clear `pendingSessionList` and treat as a normal message
+3. User replies `/1`, `/2`, etc. to switch — these are handled by the `/N` command handler (no pending state)
 
 ---
 
