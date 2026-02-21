@@ -157,18 +157,28 @@ function createClaudeSession(): string | null {
     }
   }
 
-  // Create new tab and get its session ID
+  // Create new tab (or new window if none exist) and get its session ID
   const createScript = `
 tell application "iTerm2"
-  tell current window
-    set newTab to (create tab with default profile)
-    tell current session of newTab
+  if (count of windows) = 0 then
+    set newWindow to (create window with default profile)
+    tell current session of current tab of newWindow
       write text "cd ${home}"
       delay 0.5
       write text "claude"
       return id
     end tell
-  end tell
+  else
+    tell current window
+      set newTab to (create tab with default profile)
+      tell current session of newTab
+        write text "cd ${home}"
+        delay 0.5
+        write text "claude"
+        return id
+      end tell
+    end tell
+  end if
 end tell`;
 
   const sessionId = runAppleScript(createScript);
