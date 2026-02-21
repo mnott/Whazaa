@@ -1,6 +1,6 @@
 # Whazaa
 
-WhatsApp MCP server for Claude Code — bidirectional self-chat messaging.
+WhatsApp MCP server for Claude Code — bidirectional self-chat messaging with terminal integration.
 
 You message yourself on WhatsApp, Claude receives it. Claude responds, you see it on WhatsApp. Your phone becomes a parallel terminal.
 
@@ -9,6 +9,7 @@ You message yourself on WhatsApp, Claude receives it. Claude responds, you see i
 ## Features
 
 - **Bidirectional messaging** — send from Claude, receive from your phone
+- **Terminal watcher** — incoming messages are typed directly into your Claude Code session via iTerm2
 - **Zero configuration** — auto-detects your phone number after first scan
 - **First-run QR pairing** — scan once, connects automatically thereafter
 - **Markdown support** — `**bold**`, `*italic*`, `` `code` `` converted to WhatsApp format
@@ -51,7 +52,7 @@ Messages go through your WhatsApp self-chat — the chat with yourself (sometime
 Just say something like:
 - "Message me on WhatsApp when you're done"
 - "Continue on WhatsApp"
-- "Listen on WhatsApp" — Claude will check for your messages every few seconds, so you can give instructions from your phone
+- "Listen on WhatsApp" — Claude will start the watcher and receive your messages as terminal input
 
 **Example:**
 1. In Claude Code: "Refactor the auth module and message me on WhatsApp when done"
@@ -59,6 +60,49 @@ Just say something like:
 3. Claude finishes and WhatsApps you: "Done. What's next?"
 4. You reply from your phone: "Now run the tests"
 5. Claude reads your reply and runs the tests
+
+---
+
+## Terminal Watcher (iTerm2)
+
+The `watch` command bridges WhatsApp messages directly into a Claude Code terminal session. Incoming messages are typed into the terminal via AppleScript automation — Claude sees them as regular user input.
+
+### How it works
+
+1. Whazaa MCP server writes incoming messages to a log file
+2. The watcher polls the log for new lines (every 2 seconds)
+3. New messages are typed into the target iTerm2 session via `osascript`
+4. Messages arrive prefixed with `[WhatsApp]` so Claude knows the source
+
+### Starting the watcher
+
+From within Claude Code (recommended — Claude can restart it if it crashes):
+
+```bash
+node /path/to/whazaa/dist/index.js watch "$ITERM_SESSION_ID"
+```
+
+Or from a separate terminal:
+
+```bash
+npx whazaa watch <session-id>
+```
+
+The session ID is available as `$ITERM_SESSION_ID` in any iTerm2 shell. The `w1t1p0:` prefix is automatically stripped — you can pass the full value or just the UUID.
+
+### Stopping the watcher
+
+```bash
+pkill -f "whazaa.*watch"
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WHAZAA_LOG` | `/tmp/whazaa-incoming.log` | Path to the incoming message log file |
+| `WHAZAA_POLL_INTERVAL` | `2` | Seconds between file checks |
+| `WHAZAA_PREFIX` | `[WhatsApp]` | Prefix added to messages typed into the terminal |
 
 ---
 
@@ -83,8 +127,7 @@ If you prefer to configure manually, add Whazaa to `~/.claude/.mcp.json` (or you
   "mcpServers": {
     "whazaa": {
       "command": "npx",
-      "args": ["whazaa"],
-      "description": "Whazaa — WhatsApp self-chat MCP server for Claude Code"
+      "args": ["whazaa"]
     }
   }
 }
@@ -97,8 +140,7 @@ If you prefer to configure manually, add Whazaa to `~/.claude/.mcp.json` (or you
   "mcpServers": {
     "whazaa": {
       "command": "bunx",
-      "args": ["whazaa"],
-      "description": "Whazaa — WhatsApp self-chat MCP server for Claude Code"
+      "args": ["whazaa"]
     }
   }
 }
@@ -111,31 +153,52 @@ If you prefer to configure manually, add Whazaa to `~/.claude/.mcp.json` (or you
   "mcpServers": {
     "whazaa": {
       "command": "node",
-      "args": ["/path/to/whazaa/dist/index.js"],
-      "description": "Whazaa — WhatsApp self-chat MCP server for Claude Code"
+      "args": ["/path/to/whazaa/dist/index.js"]
     }
   }
 }
 ```
 
-After updating the MCP config, restart Claude Code. On first run, Whazaa prints a QR code to the Claude Code logs (check Settings -> Developer -> MCP Logs or run it manually from a terminal first to complete pairing).
+After updating the MCP config, restart Claude Code. On first run, Whazaa prints a QR code to the Claude Code logs (check Settings → Developer → MCP Logs, or run it manually from a terminal first to complete pairing).
 
 ---
 
-## Available Tools
+## MCP Tools
 
 | Tool | Description |
 |------|-------------|
 | `whatsapp_status` | Report connection state and phone number |
 | `whatsapp_send` | Send a message to your own WhatsApp self-chat |
 | `whatsapp_receive` | Drain queued incoming messages from your phone |
+| `whatsapp_wait` | Block until a message arrives (up to timeout) |
 | `whatsapp_login` | Trigger a new QR pairing flow |
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `whazaa setup` | Interactive setup — configures MCP, pairs with WhatsApp |
+| `whazaa watch <session-id>` | Start terminal watcher for iTerm2 session |
+| `whazaa uninstall` | Remove MCP config and stored credentials |
 
 ---
 
 ## How It Works
 
-Whazaa uses the [Baileys](https://github.com/WhiskeySockets/Baileys) library to maintain a persistent WebSocket connection to WhatsApp's servers using the same multi-device protocol as WhatsApp Web. It exposes four MCP tools over stdin/stdout and routes all Baileys output to stderr to keep the JSON-RPC stream clean. Incoming messages from your phone are queued in memory and returned when `whatsapp_receive` is called.
+Whazaa uses the [Baileys](https://github.com/WhiskeySockets/Baileys) library to maintain a persistent WebSocket connection to WhatsApp's servers using the same multi-device protocol as WhatsApp Web. It exposes MCP tools over stdin/stdout and routes all Baileys output to stderr to keep the JSON-RPC stream clean.
+
+**Message flow (incoming):**
+1. You type a message on your phone in the self-chat
+2. Baileys receives it via WebSocket
+3. Whazaa queues it in memory and writes it to the log file
+4. The `watch` process detects the new line and types it into your terminal
+5. Claude Code processes it as user input
+
+**Message flow (outgoing):**
+1. Claude calls `whatsapp_send` via MCP
+2. Whazaa converts Markdown to WhatsApp formatting
+3. Baileys sends it via WebSocket
+4. The message appears on your phone
 
 ---
 
@@ -144,22 +207,9 @@ Whazaa uses the [Baileys](https://github.com/WhiskeySockets/Baileys) library to 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WHAZAA_AUTH_DIR` | `~/.whazaa/auth/` | Directory for WhatsApp session credentials |
-
-### Example: custom auth directory
-
-```json
-{
-  "mcpServers": {
-    "whazaa": {
-      "command": "node",
-      "args": ["/path/to/whazaa/dist/index.js"],
-      "env": {
-        "WHAZAA_AUTH_DIR": "/custom/path/whatsapp-creds"
-      }
-    }
-  }
-}
-```
+| `WHAZAA_LOG` | `/tmp/whazaa-incoming.log` | Incoming message log file (used by `watch`) |
+| `WHAZAA_POLL_INTERVAL` | `2` | Watcher poll interval in seconds |
+| `WHAZAA_PREFIX` | `[WhatsApp]` | Prefix for messages typed into terminal |
 
 ---
 
@@ -171,7 +221,11 @@ Your session was invalidated (e.g. you unlinked the device in WhatsApp). Run `np
 
 **Messages not received**
 
-Call `whatsapp_receive` to drain the queue. Only messages sent to your own number (the self-chat / "Saved Messages" chat) are captured.
+Call `whatsapp_receive` to drain the queue. Only messages sent to your own number (the self-chat / "Saved Messages" chat) are captured. If using the watcher, check that it's running: `ps aux | grep "whazaa.*watch"`.
+
+**Watcher not typing into terminal**
+
+Verify the session ID matches your Claude Code tab: `echo $ITERM_SESSION_ID`. The watcher requires iTerm2 on macOS.
 
 **Connection keeps dropping**
 
@@ -180,6 +234,14 @@ Whazaa uses exponential backoff to reconnect automatically. Check your network c
 **Multiple WhatsApp accounts**
 
 Set `WHAZAA_AUTH_DIR` to a different directory for each account and run separate instances.
+
+---
+
+## Requirements
+
+- Node.js >= 18
+- macOS with iTerm2 (for the `watch` command)
+- WhatsApp account with multi-device support
 
 ---
 

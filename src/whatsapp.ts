@@ -10,6 +10,10 @@
  *   - All Baileys output silenced to avoid MCP stdio pollution
  */
 
+import { appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
@@ -269,11 +273,14 @@ async function connect(): Promise<void> {
       }
 
       if (body) {
-        messageQueue.push({
-          body,
-          timestamp: Number(msg.messageTimestamp) * 1_000,
-        });
+        const ts = Number(msg.messageTimestamp) * 1_000;
+        messageQueue.push({ body, timestamp: ts });
         notifyMessageWaiters();
+
+        // Write to signal file so background watchers can detect new messages
+        const signalFile = "/tmp/whazaa-incoming.log";
+        const line = `[${new Date(ts).toISOString()}] ${body}\n`;
+        try { appendFileSync(signalFile, line); } catch { /* ignore */ }
       }
     }
   });

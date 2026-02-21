@@ -35,6 +35,7 @@ import {
   waitForLogout,
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR } from "./auth.js";
+import { watch } from "./watch.js";
 
 // ---------------------------------------------------------------------------
 // Setup wizard
@@ -383,6 +384,20 @@ async function main(): Promise<void> {
 
   if (process.argv.includes("uninstall")) {
     await uninstall();
+    return;
+  }
+
+  if (process.argv.includes("watch")) {
+    const watchIdx = process.argv.indexOf("watch");
+    const sessionId = process.argv[watchIdx + 1];
+    if (!sessionId) {
+      console.error("Usage: whazaa watch <iterm-session-id>");
+      console.error("");
+      console.error("The session ID is available as $ITERM_SESSION_ID in iTerm2.");
+      console.error("Example: whazaa watch w1t1p0:9E273A47-BAAF-499E-9AF4-AAC5997FFF5E");
+      process.exit(1);
+    }
+    await watch(sessionId);
     return;
   }
 
