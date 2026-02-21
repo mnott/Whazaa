@@ -73,8 +73,20 @@ The `watch` command bridges WhatsApp messages directly into a Claude Code termin
 
 1. Whazaa MCP server writes incoming messages to a log file
 2. The watcher polls the log for new lines (every 2 seconds)
-3. New messages are typed into the target iTerm2 session via `osascript`
-4. Messages arrive prefixed with `[WhatsApp]` so Claude knows the source
+3. The watcher resolves the target iTerm2 session (see below)
+4. New messages are typed into that session via `osascript`
+5. Messages arrive prefixed with `WHAZAA_PREFIX` so Claude knows the source
+
+### Session resolution
+
+The watcher uses a fallback chain to find a usable iTerm2 session:
+
+1. **Try the specified session ID** — uses the session ID passed on the command line
+2. **Search by tab name** — if that session is gone, scans all iTerm2 sessions for one whose tab name contains "claude"
+3. **Retry after 2 seconds** — if still not found, waits and tries again (AppleScript may need a moment to connect when the watcher starts fresh from launchd)
+4. **Create a new tab** — if no session is found after the retry, opens a new iTerm2 tab, runs `claude`, waits for it to boot, then uses that session
+
+This means the watcher can recover automatically if you close and reopen your Claude Code tab, or if it was started before iTerm2 was fully ready.
 
 ### Starting the watcher
 
@@ -92,11 +104,17 @@ npx whazaa watch <session-id>
 
 The session ID is available as `$ITERM_SESSION_ID` in any iTerm2 shell. The `w1t1p0:` prefix is automatically stripped — you can pass the full value or just the UUID.
 
-### Stopping the watcher
+### Persistent watcher (launchd)
+
+For a watcher that survives terminal closure and Claude Code `/clear`, run it as a macOS launchd agent using the control script at `scripts/watcher-ctl.sh`:
 
 ```bash
-pkill -f "whazaa.*watch"
+scripts/watcher-ctl.sh start    # Install and start as launchd agent
+scripts/watcher-ctl.sh stop     # Stop and unload the agent
+scripts/watcher-ctl.sh status   # Show whether the agent is running
 ```
+
+The launchd agent is configured with `KeepAlive: true`, so macOS automatically restarts the watcher if it crashes. It also uses `ProcessType: Interactive` and `LimitLoadToSessionType: Aqua`, which gives the agent access to the macOS GUI session. This is required because AppleScript needs a GUI context to control iTerm2 — without it, `osascript` calls from a launchd background agent would fail silently or be refused by the system.
 
 ### Configuring Claude to reply on WhatsApp
 
@@ -118,7 +136,7 @@ terminal so the user sees your reply on their phone.
 |----------|---------|-------------|
 | `WHAZAA_LOG` | `/tmp/whazaa-incoming.log` | Path to the incoming message log file |
 | `WHAZAA_POLL_INTERVAL` | `2` | Seconds between file checks |
-| `WHAZAA_PREFIX` | `[WhatsApp]` | Prefix added to messages typed into the terminal |
+| `WHAZAA_PREFIX` | `` | Prefix added to messages typed into the terminal (empty by default) |
 
 ---
 
@@ -203,6 +221,9 @@ After updating the MCP config, restart Claude Code. On first run, Whazaa prints 
 
 Whazaa uses the [Baileys](https://github.com/WhiskeySockets/Baileys) library to maintain a persistent WebSocket connection to WhatsApp's servers using the same multi-device protocol as WhatsApp Web. It exposes MCP tools over stdin/stdout and routes all Baileys output to stderr to keep the JSON-RPC stream clean.
 
+**Stale instance cleanup:**
+When a new MCP server starts, it automatically finds and kills any existing Whazaa MCP processes (excluding watch processes and itself). This prevents multiple instances from competing for the same WhatsApp auth credentials, which would otherwise cause frequent disconnects as each instance races to own the session.
+
 **Message flow (incoming):**
 1. You type a message on your phone in the self-chat
 2. Baileys receives it via WebSocket
@@ -225,7 +246,7 @@ Whazaa uses the [Baileys](https://github.com/WhiskeySockets/Baileys) library to 
 | `WHAZAA_AUTH_DIR` | `~/.whazaa/auth/` | Directory for WhatsApp session credentials |
 | `WHAZAA_LOG` | `/tmp/whazaa-incoming.log` | Incoming message log file (used by `watch`) |
 | `WHAZAA_POLL_INTERVAL` | `2` | Watcher poll interval in seconds |
-| `WHAZAA_PREFIX` | `[WhatsApp]` | Prefix for messages typed into terminal |
+| `WHAZAA_PREFIX` | `` | Prefix for messages typed into terminal (empty by default) |
 
 ---
 
@@ -238,6 +259,10 @@ Your session was invalidated (e.g. you unlinked the device in WhatsApp). Run `np
 **Messages not received**
 
 Call `whatsapp_receive` to drain the queue. Only messages sent to your own number (the self-chat / "Saved Messages" chat) are captured. If using the watcher, check that it's running: `ps aux | grep "whazaa.*watch"`.
+
+**"iTerm2 wants to control..." security prompt**
+
+On first use, macOS will show a security dialog asking whether to allow the watcher (or `osascript`) to control iTerm2. Click "OK" to allow it. If you accidentally clicked "Don't Allow", go to System Settings → Privacy & Security → Automation and enable iTerm2 for the relevant app. Without this permission, the watcher cannot type messages into your terminal.
 
 **Watcher not typing into terminal**
 

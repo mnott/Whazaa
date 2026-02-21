@@ -50,6 +50,10 @@ cmd_start() {
   <string>${LOG}</string>
   <key>ThrottleInterval</key>
   <integer>3</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
 </dict>
 </plist>
 PLIST

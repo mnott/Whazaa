@@ -115,12 +115,8 @@ end tell`;
     const id = line.substring(0, tabIdx);
     const name = line.substring(tabIdx + 1).toLowerCase();
 
-    // Match common Claude Code indicators in the tab title
-    if (
-      name.includes("claude") ||
-      name.includes("pai ready") ||
-      name.includes("pai ") // PAI hooks set tab titles like "PAI Ready", "PAI Systems"
-    ) {
+    // Match Claude Code in the tab title (covers "claude", "(claude)", "Claude Code")
+    if (name.includes("claude")) {
       process.stderr.write(
         `[whazaa-watch] Found claude session: ${id} ("${line.substring(tabIdx + 1)}")\n`
       );
@@ -248,6 +244,23 @@ export async function watch(rawSessionId: string): Promise<void> {
     const found = findClaudeSession();
     if (found) {
       activeSessionId = found;
+      process.stderr.write(
+        `[whazaa-watch] Retargeted to session: ${activeSessionId}\n`
+      );
+      if (typeIntoSession(activeSessionId, text)) {
+        consecutiveFailures = 0;
+        return true;
+      }
+    }
+
+    // Attempt 2b: retry after a short delay (AppleScript may need time after launchd start)
+    process.stderr.write(
+      "[whazaa-watch] Retrying session search after delay...\n"
+    );
+    spawnSync("sleep", ["2"]);
+    const retryFound = findClaudeSession();
+    if (retryFound) {
+      activeSessionId = retryFound;
       process.stderr.write(
         `[whazaa-watch] Retargeted to session: ${activeSessionId}\n`
       );
