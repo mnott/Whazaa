@@ -18,7 +18,7 @@
  * In setup mode stdout is the terminal — console.log is safe to use.
  */
 
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -51,9 +51,28 @@ import { watch } from "./watch.js";
  *    displayed on stderr, then waits until the user scans it.
  * 4. Prints a success message and exits.
  */
+/**
+ * Open a URL in the user's default browser, platform-agnostic.
+ */
+function openBrowser(url: string): void {
+  const cmd =
+    process.platform === "darwin"
+      ? "open"
+      : process.platform === "win32"
+      ? "start"
+      : "xdg-open";
+  spawn(cmd, [url], { detached: true, stdio: "ignore" }).unref();
+}
+
 async function setup(): Promise<void> {
   enableSetupMode();
-  console.log("Whazaa Setup\n");
+
+  // Open the Whazaa GitHub repository in the user's default browser.
+  const repoUrl = "https://github.com/mnott/Whazaa";
+  console.log(`Opening Whazaa on GitHub: ${repoUrl}`);
+  openBrowser(repoUrl);
+
+  console.log("\nWhazaa Setup\n");
 
   // ------------------------------------------------------------------
   // Step 1: Configure ~/.claude/.mcp.json
@@ -385,7 +404,7 @@ function killStaleInstances(): void {
   try {
     // Find all node processes running Whazaa's index.js (excluding watch mode)
     const output = execSync(
-      `ps ax -o pid,args | grep '[d]ist/index.js' | grep -v ' watch '`,
+      `ps ax -o pid,args | grep '[d]ist/index.js' | grep -v 'index.js watch'`,
       { encoding: "utf-8", timeout: 5_000 },
     );
 
