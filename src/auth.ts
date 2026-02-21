@@ -51,6 +51,22 @@ export function enableSetupMode(): void {
   setupMode = true;
 }
 
+/**
+ * When true, QR display is suppressed (used during session verification
+ * in setup mode so we don't open a browser tab just to check connectivity).
+ */
+let qrSuppressed = false;
+
+/** Suppress QR display — call before a verification-only connection attempt. */
+export function suppressQRDisplay(): void {
+  qrSuppressed = true;
+}
+
+/** Re-enable QR display — call after verification, before a real pairing attempt. */
+export function unsuppressQRDisplay(): void {
+  qrSuppressed = false;
+}
+
 /** Path to the temporary QR HTML file (so we can clean it up) */
 let qrHtmlPath: string | null = null;
 
@@ -62,6 +78,13 @@ let qrHtmlPath: string | null = null;
  * In setup mode, an HTML page is generated and opened in the default browser.
  */
 export function printQR(qrString: string): void {
+  // During setup's verification phase, QR display is suppressed so we don't
+  // open a browser tab merely to check whether an existing session is still valid.
+  if (qrSuppressed) {
+    process.stderr.write("[whazaa] QR suppressed during session verification.\n");
+    return;
+  }
+
   if (setupMode) {
     printQRBrowser(qrString).catch((err) => {
       process.stderr.write(`[whazaa] Browser QR failed: ${err}\n`);

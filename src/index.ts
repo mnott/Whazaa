@@ -34,8 +34,9 @@ import {
   triggerLogin,
   waitForConnection,
   waitForLogout,
+  waitForQR,
 } from "./whatsapp.js";
-import { resolveAuthDir, enableSetupMode, cleanupQR } from "./auth.js";
+import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 import { watch } from "./watch.js";
 
 // ---------------------------------------------------------------------------
@@ -120,24 +121,48 @@ async function setup(): Promise<void> {
     existsSync(authDir) && readdirSync(authDir).some((f) => f === "creds.json");
 
   if (alreadyPaired) {
-    // Credentials exist — try to connect. If 401 (logged out), wipe and re-pair.
+    // Credentials exist — verify the session is still live.
+    // Suppress QR display during this check: if Baileys emits a QR it means
+    // the saved session is invalid, but we don't want a browser tab opening
+    // just for a verification probe.
     console.log("\nExisting session found — verifying connection...");
+    suppressQRDisplay();
     initialize().catch(() => {});
 
-    // Race: either we connect, or we get logged out (401)
+    // Race: connected (valid session) | logged-out 401 (invalid) | QR emitted
+    // (invalid — session was revoked on the phone side) | timeout (10 s).
+    // A QR during verification means the credentials are stale.
+    const VERIFY_TIMEOUT_MS = 10_000;
     const result = await Promise.race([
-      waitForConnection().then((phone) => ({ ok: true as const, phone })),
-      waitForLogout().then(() => ({ ok: false as const })),
+      waitForConnection().then((phone) => ({ outcome: "connected" as const, phone })),
+      waitForLogout().then(() => ({ outcome: "logout" as const, phone: null })),
+      waitForQR().then(() => ({ outcome: "qr" as const, phone: null })),
+      new Promise<{ outcome: "timeout"; phone: null }>((resolve) =>
+        setTimeout(() => resolve({ outcome: "timeout", phone: null }), VERIFY_TIMEOUT_MS)
+      ),
     ]);
 
-    if (result.ok) {
-      console.log(`\nConnected to WhatsApp as +${result.phone}`);
-      console.log("\nSetup complete! Restart Claude Code and Whazaa will be ready.");
+    unsuppressQRDisplay();
+
+    if (result.outcome === "connected") {
+      console.log(`\nAlready connected! Your WhatsApp session is active as +${result.phone}.`);
+      console.log("\nSetup complete! Restart Claude Code if Whazaa is not yet available.");
       process.exit(0);
     }
 
-    // 401 — stale credentials, wipe and re-pair
-    console.log("\nSession expired. Clearing old credentials and re-pairing...\n");
+    // QR or 401 or timeout — treat all as stale/unavailable credentials.
+    if (result.outcome === "logout" || result.outcome === "qr") {
+      console.log("\nSession expired or revoked. Clearing old credentials and re-pairing...\n");
+    } else {
+      // Timeout: could not confirm connection within VERIFY_TIMEOUT_MS.
+      // This can happen when another Whazaa process is already running and
+      // holding the connection. Rather than risk disrupting it, treat the
+      // existing credentials as valid and exit cleanly.
+      console.log("\nCould not verify connection (another Whazaa instance may already be running).");
+      console.log("Assuming session is active. If Whazaa tools are not working, run `npx whazaa setup` again.");
+      process.exit(0);
+    }
+
     rmSync(authDir, { recursive: true, force: true });
   }
 
