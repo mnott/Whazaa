@@ -1,0 +1,375 @@
+# Whazaa Architecture
+
+Technical reference for contributors and developers.
+
+---
+
+## Overview
+
+Whazaa is a WhatsApp bridge for Claude Code. It has two main runtime components:
+
+- **Watcher daemon** (`src/watch.ts`) — owns the Baileys/WhatsApp connection, serves IPC, delivers messages to iTerm2
+- **MCP server** (`src/index.ts`) — thin IPC proxy started by Claude Code; no direct WhatsApp connection
+
+Supporting modules:
+- `src/ipc-client.ts` — client-side IPC transport used by the MCP server
+- `src/auth.ts` — credentials directory resolution and QR code display
+- `src/whatsapp.ts` — standalone Baileys connection used only by the setup wizard
+
+---
+
+## Architecture diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Your phone                                                      │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ WhatsApp multi-device protocol
+                           │ (Baileys WebSocket)
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Watcher daemon  (watch.ts)                                      │
+│                                                                 │
+│  connectWatcher()                                               │
+│    ├── Baileys socket (sole owner)                              │
+│    ├── messages.upsert handler                                  │
+│    │     ├── self-chat filter                                   │
+│    │     ├── deduplication (sentMessageIds)                     │
+│    │     └── dispatchIncomingMessage()                          │
+│    │           ├── clientQueues[activeClientId].push()          │
+│    │           └── wake clientWaiters[activeClientId]           │
+│    └── handleMessage()                                          │
+│          ├── /relocate <path>  →  handleRelocate()              │
+│          ├── /sessions         →  listClaudeSessions()          │
+│          ├── numeric reply     →  switch active session         │
+│          ├── dispatchIncomingMessage() (IPC queue)              │
+│          └── deliverMessage() (iTerm2 via AppleScript)          │
+│                                                                 │
+│  startIpcServer()  →  /tmp/whazaa-watcher.sock                  │
+│    Methods: register | status | send | receive | wait | login   │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ Unix Domain Socket (NDJSON)
+                           │ /tmp/whazaa-watcher.sock
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ MCP server  (index.ts)                                          │
+│                                                                 │
+│  WatcherClient (ipc-client.ts)                                  │
+│    ├── sessionId = TERM_SESSION_ID ?? "unknown-session"         │
+│    └── per-call socket: connect → send → receive → close        │
+│                                                                 │
+│  MCP tools (stdio JSON-RPC)                                     │
+│    ├── whatsapp_status   →  watcher.status()                    │
+│    ├── whatsapp_send     →  watcher.send(message)               │
+│    ├── whatsapp_receive  →  watcher.receive()                   │
+│    ├── whatsapp_wait     →  watcher.wait(timeoutMs)             │
+│    └── whatsapp_login    →  watcher.login()                     │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ MCP stdio JSON-RPC
+                           ▼
+                    Claude Code (AI)
+```
+
+---
+
+## IPC protocol
+
+The watcher and MCP server communicate over a Unix Domain Socket at `/tmp/whazaa-watcher.sock` using NDJSON (newline-delimited JSON). Each call is a single request-response exchange over a fresh connection.
+
+### Request format
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "sessionId": "w2:E4B9D3A1-...",
+  "method": "send",
+  "params": {
+    "message": "Hello from Claude"
+  }
+}
+```
+
+- `id` — UUID generated per call, echoed in the response for correlation
+- `sessionId` — the calling MCP server's `TERM_SESSION_ID` (set by iTerm2)
+- `method` — one of the six methods below
+- `params` — method-specific parameters
+
+### Response format
+
+Success:
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "ok": true,
+  "result": { "preview": "Hello from Claude" }
+}
+```
+
+Error:
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "ok": false,
+  "error": "WhatsApp is not connected."
+}
+```
+
+### IPC methods
+
+#### register
+
+Registers the calling session as a known client and initializes its message queue. No params. The client is not made active until it calls `send`.
+
+```json
+// params: {}
+// result: { "registered": true }
+```
+
+#### status
+
+Returns the current WhatsApp connection state.
+
+```json
+// params: {}
+// result: { "connected": true, "phoneNumber": "1234567890", "awaitingQR": false }
+```
+
+#### send
+
+Send a message via the watcher's Baileys socket. Sets the caller as the active session (routing future incoming messages to this client's queue). Markdown is converted to WhatsApp format before sending.
+
+```json
+// params: { "message": "**Hello** from Claude" }
+// result: { "preview": "**Hello** from Claude" }
+```
+
+The preview is truncated to 80 characters for the response.
+
+#### receive
+
+Drain and return all messages in the caller's queue. Returns an empty array if none are queued.
+
+```json
+// params: {}
+// result: { "messages": [{ "body": "text", "timestamp": 1708000000000 }] }
+```
+
+#### wait
+
+Long-poll: blocks until a message arrives in the caller's queue or the timeout expires. Returns immediately if messages are already queued. If the client socket closes before the timeout, the waiter is cleaned up without sending a response.
+
+```json
+// params: { "timeoutMs": 120000 }
+// result: { "messages": [] }   // on timeout
+// result: { "messages": [{ "body": "text", "timestamp": 1708000000000 }] }
+```
+
+The IPC client uses a 310-second transport timeout (slightly above the max 300-second wait timeout) to ensure the socket is never closed before a valid long-poll response arrives.
+
+#### login
+
+Triggers a new Baileys QR pairing flow on the watcher. The QR code is printed to the watcher's stderr. Returns immediately — the caller does not wait for the scan to complete.
+
+```json
+// params: {}
+// result: { "message": "QR pairing initiated. Check the watcher terminal..." }
+```
+
+---
+
+## Session routing
+
+The watcher maintains per-client state to support multiple simultaneous Claude Code sessions.
+
+```typescript
+// The session ID of the most-recently-active MCP client
+let activeClientId: string | null = null;
+
+// Per-client incoming message queues
+const clientQueues = new Map<string, QueuedMessage[]>();
+
+// Per-client long-poll waiters
+const clientWaiters = new Map<string, Array<(msgs: QueuedMessage[]) => void>>();
+```
+
+**Active session selection:** Whichever MCP client most recently called `send` becomes `activeClientId`. Incoming WhatsApp messages are routed to that client's queue only. Registration via `register` does not change the active client — it only initializes the queue.
+
+**iTerm2 delivery is unconditional:** The watcher types all incoming messages into iTerm2 regardless of which MCP client is active. IPC queue routing is additive — it does not replace iTerm2 delivery.
+
+**Wake-up for wait:** When a new message arrives for `activeClientId`, any pending `wait` waiters are resolved immediately:
+
+```typescript
+function dispatchIncomingMessage(body: string, timestamp: number): void {
+  if (activeClientId !== null) {
+    clientQueues.get(activeClientId)!.push({ body, timestamp });
+
+    const waiters = clientWaiters.get(activeClientId);
+    if (waiters && waiters.length > 0) {
+      const msgs = clientQueues.get(activeClientId)!.splice(0);
+      const resolved = waiters.splice(0);
+      for (const resolve of resolved) resolve(msgs);
+    }
+  }
+}
+```
+
+---
+
+## Baileys connection lifecycle
+
+The watcher holds the sole Baileys connection. It never shares the socket with MCP server instances.
+
+```
+openSocket()
+  │
+  ├── useMultiFileAuthState(authDir)   // load/create credentials
+  ├── fetchLatestBaileysVersion()      // fetch current WA version from GitHub
+  └── makeWASocket({ ... })
+        │
+        ├── creds.update   → saveCreds()
+        ├── connection.update
+        │     ├── qr         → printQR() to stderr
+        │     ├── open       → set watcherStatus.connected = true
+        │     └── close
+        │           ├── 401 (loggedOut) → permanentlyLoggedOut = true, stop
+        │           └── other           → scheduleReconnect()
+        └── messages.upsert → self-chat filter → onMessage()
+```
+
+**Reconnection:** Exponential backoff from 1s to 60s max. Counter resets on successful open.
+
+**Self-echo suppression:** When `send` is called, the outgoing message ID is added to `sentMessageIds` with a 30-second TTL. If that ID appears in `messages.upsert`, it is dropped silently.
+
+**Self-chat detection:** Three checks in OR:
+1. `remoteJid` (device-stripped) matches `selfJid` (`number@s.whatsapp.net`)
+2. `remoteJid` (device-stripped) matches `selfLid` (Linked Identity JID, `@lid`)
+3. `remoteJid` starts with the phone number string
+
+All JIDs are stripped of device suffixes (`strip(':N@')`) before comparison.
+
+---
+
+## iTerm2 integration
+
+The watcher uses AppleScript (`osascript`) for all iTerm2 interaction. All `spawnSync("osascript", ...)` calls have a 10-second timeout.
+
+### Message delivery
+
+`typeIntoSession(sessionId, text)` iterates all iTerm2 windows/tabs/sessions, finds the matching session ID, and types the text followed by a carriage return.
+
+### Session resolution fallback chain
+
+`deliverMessage(text)` uses this sequence:
+
+1. **Cached session** — call `isClaudeRunningInSession(sessionId)`. If it returns `"running"`, type into it. Skip if `"shell"` (Claude has exited) or `"not_found"`.
+2. **Search** — `findClaudeSession()` scans all sessions for a tab name containing "claude" (case-insensitive). Verify with `isClaudeRunningInSession`.
+3. **Create** — `createClaudeSession()` opens a new iTerm2 tab (or window if none exist), runs `cd $HOME && claude`, and waits 8 seconds for Claude Code to boot.
+
+### Claude running check
+
+`isClaudeRunningInSession` uses the iTerm2 AppleScript `is at shell prompt` property. A session at the shell prompt means Claude has exited. A non-shell-prompt session is assumed to be running Claude.
+
+### TTY-to-cwd resolution
+
+`cwdFromTty(tty)` resolves the working directory of a Claude process on a given TTY:
+
+1. `ps -eo pid,tty,comm` to find the Claude process PID for the TTY
+2. `lsof -a -d cwd -p <pid> -Fn` to read the current working directory
+
+Used by `listClaudeSessions()` to show meaningful paths in `/sessions` output.
+
+---
+
+## WhatsApp commands (watcher-intercepted)
+
+Before forwarding a message to iTerm2 or the IPC queue, `handleMessage` checks for watcher commands.
+
+### /relocate (and /r)
+
+Pattern: `/relocate <path>` or `/r <path>`
+
+1. Tilde-expand the path (`expandTilde`)
+2. `findClaudeInDirectory(expandedPath)` — scan sessions for one with `name.includes("claude")` and `session.path === targetDir`
+3. If found, focus that session in iTerm2 and set it as active
+4. If not found, open a new iTerm2 tab with `cd "<path>" && claude`
+5. Update `activeSessionId`
+
+### /sessions (and /s)
+
+1. `listClaudeSessions()` — return all sessions whose tab name contains "claude"
+2. Send a numbered list to WhatsApp via `watcherSendMessage`
+3. Store the list in `pendingSessionList`
+
+On next message:
+- Number 1-N: focus the chosen session, update `activeSessionId`
+- `0`, `cancel`, `c`, `back`: cancel
+- Anything else: clear `pendingSessionList` and treat as a normal message
+
+---
+
+## Setup wizard
+
+`npx whazaa setup` runs through `index.ts → setup()` using `whatsapp.ts` (not the watcher):
+
+1. Write/update `~/.claude/.mcp.json` with the whazaa entry
+2. If `~/.whazaa/auth/creds.json` exists, attempt a verification connection with a 10-second timeout. Race: connected / logout / QR / timeout
+3. If already connected: exit successfully
+4. If stale credentials: delete auth dir, fall through to pairing
+5. If timeout (another instance running): warn and exit
+6. Call `triggerLogin()` to start a fresh Baileys connection
+7. Open QR code in browser (`auth.ts → printQRBrowser`)
+8. `waitForConnection()` blocks until pairing completes
+9. 5-second sync delay, then exit
+
+The setup wizard uses `whatsapp.ts` rather than `watch.ts` because it needs a temporary, standalone connection that can be verified and torn down cleanly without starting the full watcher daemon.
+
+---
+
+## Stale instance cleanup
+
+When the MCP server starts in normal mode (not setup/uninstall/watch), it does not kill stale instances — this was removed in favor of relying on the watcher's IPC socket to serialize access.
+
+Previous MCP server instances that are still running will compete for the IPC socket but do not hold WhatsApp connections (the watcher does). Multiple MCP server instances sending to the same watcher is safe.
+
+---
+
+## File structure
+
+```
+src/
+  index.ts        Entry point. CLI dispatch (setup/uninstall/watch) + MCP server
+  watch.ts        Watcher daemon: Baileys connection, IPC server, iTerm2 delivery
+  ipc-client.ts   WatcherClient: per-call socket transport for IPC methods
+  auth.ts         Auth directory resolution, QR display (terminal + browser)
+  whatsapp.ts     Standalone Baileys connection (setup wizard only)
+
+scripts/
+  watcher-ctl.sh  launchd agent install/start/stop/status helper
+
+dist/             Compiled JavaScript output (generated by tsc)
+```
+
+---
+
+## stdout discipline
+
+The MCP server communicates with Claude Code over stdin/stdout using the JSON-RPC protocol. Any non-JSON bytes on stdout break the protocol silently.
+
+Rules enforced throughout the codebase:
+- All debug output, errors, and QR codes go to `process.stderr`
+- `console.log` is only used in setup/uninstall/watch modes where stdout is a terminal
+- Baileys uses a `pino` logger configured to `level: "silent"` to prevent internal log output
+- `printQRInTerminal: false` in Baileys options prevents the default QR terminal output
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `@modelcontextprotocol/sdk` | MCP server and stdio transport |
+| `@whiskeysockets/baileys` | WhatsApp Web multi-device protocol |
+| `pino` | Logger (used silenced, required by Baileys) |
+| `qrcode` | SVG QR generation for browser display |
+| `qrcode-terminal` | ASCII QR rendering for terminal display |
+| `zod` | MCP tool parameter schema validation |

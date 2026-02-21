@@ -2,24 +2,29 @@
 /**
  * index.ts — Whazaa MCP server entry point
  *
- * Exposes four tools over the Model Context Protocol (stdio transport):
+ * Exposes five tools over the Model Context Protocol (stdio transport):
  *
  *   whatsapp_status   — Report connection state and phone number
  *   whatsapp_send     — Send a message to your own WhatsApp number
  *   whatsapp_receive  — Drain queued incoming messages from your phone
+ *   whatsapp_wait     — Long-poll for the next incoming message
  *   whatsapp_login    — Trigger a new QR pairing flow
+ *
+ * Architecture: The MCP server is a thin IPC proxy. All WhatsApp operations
+ * are forwarded to the watcher daemon (watch.ts) over a Unix Domain Socket
+ * at /tmp/whazaa-watcher.sock. The watcher is the sole owner of the Baileys
+ * connection. If the watcher is not running, tools return a clear error.
  *
  * CRITICAL: stdout is the MCP JSON-RPC transport.
  *   - NEVER write non-JSON to stdout.
  *   - All debug output, QR codes, and logs go to stderr.
  *
- * SETUP MODE: When invoked with the "setup" argument (e.g. `npx whazaa setup`),
- * the script runs an interactive setup wizard instead of starting the MCP server.
- * In setup mode stdout is the terminal — console.log is safe to use.
+ * SETUP MODE: When invoked with "setup" argument, runs an interactive setup
+ * wizard. In setup mode stdout is the terminal — console.log is safe.
  */
 
-import { execSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -27,32 +32,19 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   initialize,
-  getStatus,
-  sendMessage,
-  drainMessages,
-  waitForMessages,
   triggerLogin,
   waitForConnection,
   waitForLogout,
   waitForQR,
-  registerShutdownHandlers,
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 import { watch } from "./watch.js";
+import { WatcherClient } from "./ipc-client.js";
 
 // ---------------------------------------------------------------------------
 // Setup wizard
 // ---------------------------------------------------------------------------
 
-/**
- * Interactive setup wizard invoked via `npx whazaa setup`.
- *
- * 1. Adds the whazaa entry to ~/.claude/.mcp.json (creates file if absent).
- * 2. Checks whether a pairing session already exists.
- * 3. If not yet paired, starts the WhatsApp connection so the QR code is
- *    displayed on stderr, then waits until the user scans it.
- * 4. Prints a success message and exits.
- */
 /**
  * Open a URL in the user's default browser, platform-agnostic.
  */
@@ -69,7 +61,6 @@ function openBrowser(url: string): void {
 async function setup(): Promise<void> {
   enableSetupMode();
 
-  // Open the Whazaa GitHub repository in the user's default browser.
   const repoUrl = "https://github.com/mnott/Whazaa";
   console.log(`Opening Whazaa on GitHub: ${repoUrl}`);
   openBrowser(repoUrl);
@@ -122,17 +113,10 @@ async function setup(): Promise<void> {
     existsSync(authDir) && readdirSync(authDir).some((f) => f === "creds.json");
 
   if (alreadyPaired) {
-    // Credentials exist — verify the session is still live.
-    // Suppress QR display during this check: if Baileys emits a QR it means
-    // the saved session is invalid, but we don't want a browser tab opening
-    // just for a verification probe.
     console.log("\nExisting session found — verifying connection...");
     suppressQRDisplay();
     initialize().catch(() => {});
 
-    // Race: connected (valid session) | logged-out 401 (invalid) | QR emitted
-    // (invalid — session was revoked on the phone side) | timeout (10 s).
-    // A QR during verification means the credentials are stale.
     const VERIFY_TIMEOUT_MS = 10_000;
     const result = await Promise.race([
       waitForConnection().then((phone) => ({ outcome: "connected" as const, phone })),
@@ -151,14 +135,9 @@ async function setup(): Promise<void> {
       process.exit(0);
     }
 
-    // QR or 401 or timeout — treat all as stale/unavailable credentials.
     if (result.outcome === "logout" || result.outcome === "qr") {
       console.log("\nSession expired or revoked. Clearing old credentials and re-pairing...\n");
     } else {
-      // Timeout: could not confirm connection within VERIFY_TIMEOUT_MS.
-      // This can happen when another Whazaa process is already running and
-      // holding the connection. Rather than risk disrupting it, treat the
-      // existing credentials as valid and exit cleanly.
       console.log("\nCould not verify connection (another Whazaa instance may already be running).");
       console.log("Assuming session is active. If Whazaa tools are not working, run `npx whazaa setup` again.");
       process.exit(0);
@@ -173,7 +152,6 @@ async function setup(): Promise<void> {
   console.log("Scan the QR code in your browser with WhatsApp:");
   console.log("  Settings -> Linked Devices -> Link a Device\n");
 
-  // Use triggerLogin() instead of initialize() — it resets the permanentlyLoggedOut flag
   triggerLogin().catch(() => {});
 
   const phoneNumber = await waitForConnection();
@@ -185,7 +163,6 @@ async function setup(): Promise<void> {
   console.log(`\nConnected to WhatsApp as +${phoneNumber}`);
   console.log("Finishing sync with WhatsApp...");
 
-  // Keep the connection alive briefly so WhatsApp completes the device handshake
   await new Promise((resolve) => setTimeout(resolve, 5_000));
 
   console.log("\nSetup complete! Restart Claude Code and Whazaa will be ready.");
@@ -199,7 +176,6 @@ async function setup(): Promise<void> {
 async function uninstall(): Promise<void> {
   console.log("Whazaa Uninstall\n");
 
-  // Remove from ~/.claude/.mcp.json
   const mcpPath = join(homedir(), ".claude", ".mcp.json");
   if (existsSync(mcpPath)) {
     try {
@@ -216,14 +192,12 @@ async function uninstall(): Promise<void> {
     }
   }
 
-  // Remove auth credentials
   const authDir = resolveAuthDir();
   if (existsSync(authDir)) {
     rmSync(authDir, { recursive: true, force: true });
     console.log("Removed auth credentials from " + authDir);
   }
 
-  // Remove parent ~/.whazaa if empty
   const whazaaDir = join(homedir(), ".whazaa");
   if (existsSync(whazaaDir)) {
     try {
@@ -248,6 +222,10 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
+// Shared IPC client — one per MCP server process, bound to the session
+// identified by TERM_SESSION_ID (set by iTerm2).
+const watcher = new WatcherClient();
+
 // ---------------------------------------------------------------------------
 // Tool: whatsapp_status
 // ---------------------------------------------------------------------------
@@ -257,20 +235,28 @@ server.tool(
   "Check the Whazaa connection state and the WhatsApp phone number it is logged in as.",
   {},
   async () => {
-    const s = getStatus();
+    try {
+      const s = await watcher.status();
 
-    let text: string;
-    if (s.awaitingQR) {
-      text =
-        "Awaiting QR scan. Check the terminal where Whazaa is running and scan the QR code with WhatsApp.";
-    } else if (s.connected && s.phoneNumber) {
-      text = `Connected. Phone: +${s.phoneNumber}`;
-    } else {
-      text =
-        "Disconnected. Whazaa is attempting to reconnect in the background.";
+      let text: string;
+      if (s.awaitingQR) {
+        text =
+          "Awaiting QR scan. Check the terminal where the watcher is running and scan the QR code with WhatsApp.";
+      } else if (s.connected && s.phoneNumber) {
+        text = `Connected. Phone: +${s.phoneNumber}`;
+      } else {
+        text =
+          "Disconnected. The watcher is attempting to reconnect in the background.";
+      }
+
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
     }
-
-    return { content: [{ type: "text", text }] };
   }
 );
 
@@ -293,11 +279,9 @@ server.tool(
   },
   async ({ message }) => {
     try {
-      await sendMessage(message);
-      const preview =
-        message.length > 80 ? `${message.slice(0, 80)}...` : message;
+      const result = await watcher.send(message);
       return {
-        content: [{ type: "text", text: `Sent: ${preview}` }],
+        content: [{ type: "text", text: `Sent: ${result.preview}` }],
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -322,20 +306,29 @@ server.tool(
   ].join(" "),
   {},
   async () => {
-    const messages = drainMessages();
+    try {
+      const result = await watcher.receive();
+      const { messages } = result;
 
-    if (messages.length === 0) {
-      return { content: [{ type: "text", text: "No new messages." }] };
+      if (messages.length === 0) {
+        return { content: [{ type: "text", text: "No new messages." }] };
+      }
+
+      const formatted = messages
+        .map((m) => {
+          const ts = new Date(m.timestamp).toISOString();
+          return `[${ts}] ${m.body}`;
+        })
+        .join("\n");
+
+      return { content: [{ type: "text", text: formatted }] };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
     }
-
-    const formatted = messages
-      .map((m) => {
-        const ts = new Date(m.timestamp).toISOString();
-        return `[${ts}] ${m.body}`;
-      })
-      .join("\n");
-
-    return { content: [{ type: "text", text: formatted }] };
   }
 );
 
@@ -360,20 +353,29 @@ server.tool(
       .describe("Max seconds to wait for a message (default 120)"),
   },
   async ({ timeout }) => {
-    const messages = await waitForMessages(timeout * 1_000);
+    try {
+      const result = await watcher.wait(timeout * 1_000);
+      const { messages } = result;
 
-    if (messages.length === 0) {
-      return { content: [{ type: "text", text: "No messages received (timed out)." }] };
+      if (messages.length === 0) {
+        return { content: [{ type: "text", text: "No messages received (timed out)." }] };
+      }
+
+      const formatted = messages
+        .map((m) => {
+          const ts = new Date(m.timestamp).toISOString();
+          return `[${ts}] ${m.body}`;
+        })
+        .join("\n");
+
+      return { content: [{ type: "text", text: formatted }] };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
     }
-
-    const formatted = messages
-      .map((m) => {
-        const ts = new Date(m.timestamp).toISOString();
-        return `[${ts}] ${m.body}`;
-      })
-      .join("\n");
-
-    return { content: [{ type: "text", text: formatted }] };
   }
 );
 
@@ -387,24 +389,14 @@ server.tool(
     "Trigger a new WhatsApp QR pairing flow.",
     "Use this when the connection is lost and automatic reconnection fails,",
     "or when you need to link a different phone number.",
-    "A QR code will be printed to the Whazaa server's stderr — check the terminal where it is running.",
+    "A QR code will be printed to the watcher's stderr — check the terminal where it is running.",
   ].join(" "),
   {},
   async () => {
     try {
-      // Non-blocking: triggerLogin initiates the reconnect but QR display
-      // happens asynchronously via the Baileys event handler.
-      triggerLogin().catch((err) => {
-        process.stderr.write(`[whazaa] Login trigger error: ${err}\n`);
-      });
-
+      const result = await watcher.login();
       return {
-        content: [
-          {
-            type: "text",
-            text: "QR pairing initiated. Check the terminal where Whazaa is running and scan the QR code with WhatsApp (Linked Devices -> Link a Device).",
-          },
-        ],
+        content: [{ type: "text", text: result.message }],
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -417,45 +409,10 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Stale instance cleanup
-// ---------------------------------------------------------------------------
-
-/**
- * Kill any other Whazaa MCP server processes (not watch mode, not ourselves).
- * Multiple instances compete for the same WhatsApp auth credentials and cause
- * connection failures. This ensures only one MCP server is active at a time.
- */
-function killStaleInstances(): void {
-  const myPid = process.pid;
-  try {
-    // Find all node processes running Whazaa's index.js (excluding watch mode)
-    const output = execSync(
-      `ps ax -o pid,args | grep '[d]ist/index.js' | grep -v 'index.js watch'`,
-      { encoding: "utf-8", timeout: 5_000 },
-    );
-
-    for (const line of output.trim().split("\n")) {
-      const pid = parseInt(line.trim(), 10);
-      if (!pid || pid === myPid) continue;
-      try {
-        process.kill(pid, "SIGTERM");
-        process.stderr.write(`[whazaa] Killed stale instance (PID ${pid})\n`);
-      } catch {
-        // Process already exited — ignore
-      }
-    }
-  } catch {
-    // No matches or command failed — nothing to clean up
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  // Dispatch to setup wizard if invoked with the "setup" argument.
-  // e.g.: npx whazaa setup   or   npx -y whazaa setup
   if (process.argv.includes("setup")) {
     await setup();
     return;
@@ -468,34 +425,18 @@ async function main(): Promise<void> {
 
   if (process.argv.includes("watch")) {
     const watchIdx = process.argv.indexOf("watch");
-    const sessionId = process.argv[watchIdx + 1]; // optional — watcher discovers dynamically
+    const sessionId = process.argv[watchIdx + 1];
     await watch(sessionId);
     return;
   }
 
-  // Kill stale Whazaa MCP server instances before starting.
-  // Multiple instances compete for the same WhatsApp auth and cause disconnects.
-  killStaleInstances();
-
-  // Register shutdown handlers for the MCP server process only.
-  // The watcher registers its own handlers; whatsapp.ts no longer does this
-  // at module scope to avoid side effects when imported by the watcher.
-  registerShutdownHandlers();
-
-  // Write PID file so the watcher knows the MCP server is running and won't
-  // compete for the same WhatsApp auth credentials.
-  const MCP_PID_FILE = "/tmp/whazaa-mcp.pid";
-  writeFileSync(MCP_PID_FILE, String(process.pid));
-  const removePidFile = () => {
-    try { unlinkSync(MCP_PID_FILE); } catch { /* ignore */ }
-  };
-  process.on("exit", removePidFile);
-
-  // Start WhatsApp connection in the background.
-  // initialize() resolves once connected OR once a QR code has been emitted,
-  // so the MCP server is immediately available for tool calls in both cases.
-  initialize().catch((err) => {
-    process.stderr.write(`[whazaa] Initialization error: ${err}\n`);
+  // MCP server mode: register this session with the watcher so incoming
+  // messages are routed to our queue. Registration failure is non-fatal —
+  // the watcher may not be running yet, and the user will see a clear error
+  // when they try to use the tools.
+  watcher.register().catch((err) => {
+    process.stderr.write(`[whazaa] Could not register with watcher: ${err}\n`);
+    process.stderr.write(`[whazaa] Start the watcher with: npx whazaa watch\n`);
   });
 
   // Start the MCP server over stdio
