@@ -42,22 +42,20 @@ That's it. Restart Claude Code and you're connected.
 
 ## Usage
 
-After setup, restart Claude Code. Whazaa connects automatically — you'll see its tools available in your session.
+After setup, restart Claude Code. Whazaa connects automatically.
 
-**Claude sends you a message:**
-Claude can message you anytime during a session using the `whatsapp_send` tool. You'll see it in your WhatsApp self-chat (the chat with yourself).
+Claude can now send you WhatsApp messages, and you can reply from your phone. Messages appear in your WhatsApp self-chat — the chat with yourself (sometimes called "Saved Messages" or "Message Yourself").
 
-**You reply from your phone:**
-Type a reply in your WhatsApp self-chat. Claude picks it up via `whatsapp_receive` and continues working based on your instructions.
-
-**Example workflow:**
-1. Give Claude a task in the terminal
-2. Walk away from your desk
-3. Claude finishes and sends you a WhatsApp: "Done. What's next?"
+**Example: walk away from your desk**
+1. Give Claude a task in the terminal: "refactor the auth module"
+2. Walk away
+3. Claude finishes and WhatsApps you: "Done. What's next?"
 4. You reply from your phone: "Now run the tests"
-5. Claude picks up your reply and runs the tests
+5. Claude reads your reply and runs the tests
 
-You can also ask Claude to "listen on WhatsApp" — it will poll for your messages and respond, turning your phone into a remote terminal.
+**Example: stay in the loop while Claude works**
+
+Tell Claude "listen on WhatsApp" — it will check for your messages every few seconds, turning your phone into a remote terminal. You can give instructions, ask questions, or just say "stop" to end the loop.
 
 ---
 
