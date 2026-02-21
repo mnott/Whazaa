@@ -1,24 +1,46 @@
 /**
  * watch.ts — Smart terminal watcher for Claude Code integration
  *
- * Monitors the Whazaa incoming message log and types new messages
- * into an iTerm2 session running Claude Code.
+ * Monitors incoming WhatsApp self-chat messages via a direct Baileys connection
+ * (primary) and falls back to polling the MCP server's log file (secondary).
+ *
+ * Architecture:
+ *   - Primary: Watcher connects to WhatsApp via Baileys using the same auth
+ *     credentials as the MCP server (~/.whazaa/auth/). No extra QR scan needed.
+ *   - Fallback: Polls /tmp/whazaa-incoming.log (written by the MCP server) to
+ *     catch messages that may have arrived while the watcher's connection was
+ *     re-establishing. New lines only — old messages are never replayed.
+ *   - Deduplication: message IDs seen via the direct connection are tracked so
+ *     the log-file fallback doesn't deliver them a second time.
  *
  * Smart session resolution (in order):
- *   1. Try the specified session ID (from /whatsapp on)
- *   2. If gone, find any iTerm2 session running claude
- *   3. If none, open a new iTerm2 tab, start claude, use that
+ *   1. Try the specified session ID, but only if Claude is actually running
+ *      there (session is NOT at shell prompt)
+ *   2. If the session is gone or back at a shell prompt → create a new tab,
+ *      start claude, use that
+ *   The watcher ALWAYS delivers to iTerm2 — even when the MCP server is
+ *   running. The MCP server handles the WhatsApp connection; the watcher
+ *   is the sole delivery mechanism to the Claude terminal.
  *
  * Usage:  npx whazaa watch <session-id>
  *
  * Environment variables:
  *   WHAZAA_LOG            Path to incoming message log (default: /tmp/whazaa-incoming.log)
- *   WHAZAA_POLL_INTERVAL  Seconds between checks (default: 2)
+ *   WHAZAA_POLL_INTERVAL  Seconds between log-file checks (default: 2)
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync, execSync } from "node:child_process";
 import { homedir } from "node:os";
+
+import makeWASocket, {
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  useMultiFileAuthState,
+} from "@whiskeysockets/baileys";
+import pino from "pino";
+import { resolveAuthDir } from "./auth.js";
 
 // --- Configuration -----------------------------------------------------------
 
@@ -94,7 +116,7 @@ tell application "iTerm2"
       repeat with aSession in sessions of aTab
         set sessionId to id of aSession
         set sessionName to name of aSession
-        set output to output & sessionId & tab & sessionName & linefeed
+        set output to output & sessionId & (ASCII character 9) & sessionName & linefeed
       end repeat
     end repeat
   end repeat
@@ -122,6 +144,52 @@ end tell`;
   }
 
   return null;
+}
+
+/**
+ * Check whether Claude is actually running in the given iTerm2 session.
+ *
+ * Uses iTerm2's `is at shell prompt` AppleScript property. When a foreground
+ * process (like `claude`) is running, the session is NOT at the shell prompt,
+ * so `is at shell prompt` returns false. When Claude has exited and the tab
+ * is back at a bare shell, it returns true — meaning we must NOT type into it.
+ *
+ * Returns true if Claude appears to be running, false if the session is at a
+ * shell prompt (stale) or the session ID cannot be found.
+ */
+function isClaudeRunningInSession(sessionId: string): boolean {
+  const script = `
+tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${sessionId}" then
+          if (is at shell prompt of aSession) then
+            return "shell"
+          else
+            return "running"
+          end if
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not_found"
+end tell`;
+
+  const result = runAppleScript(script);
+  if (result === "running") {
+    return true;
+  }
+  if (result === "shell") {
+    process.stderr.write(
+      `[whazaa-watch] Session ${sessionId} is at shell prompt — Claude has exited.\n`
+    );
+  } else {
+    process.stderr.write(
+      `[whazaa-watch] Session ${sessionId} not found in iTerm2.\n`
+    );
+  }
+  return false;
 }
 
 /**
@@ -198,88 +266,325 @@ end tell`;
   return sessionId;
 }
 
+// --- MCP server detection ----------------------------------------------------
+
+const MCP_PID_FILE = "/tmp/whazaa-mcp.pid";
+
+/**
+ * Check if the MCP server is currently running by reading its PID file and
+ * verifying the process is alive. When the MCP server is active, the watcher
+ * must NOT connect to WhatsApp (same auth credentials → connection fight).
+ */
+function isMcpServerRunning(): boolean {
+  if (!existsSync(MCP_PID_FILE)) return false;
+  try {
+    const pid = parseInt(readFileSync(MCP_PID_FILE, "utf-8").trim(), 10);
+    if (!pid) return false;
+    // kill(pid, 0) tests whether the process exists without actually sending a signal
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// --- WhatsApp watcher connection ---------------------------------------------
+
+interface WatcherStatus {
+  connected: boolean;
+  phoneNumber: string | null;
+  selfJid: string | null;
+  selfLid: string | null;
+}
+
+/**
+ * Connect to WhatsApp via Baileys and call onMessage whenever a self-chat
+ * message arrives. Uses the same auth credentials as the MCP server.
+ *
+ * Returns a cleanup function that tears down the connection gracefully.
+ */
+async function connectWatcher(
+  onMessage: (body: string, msgId: string) => void
+): Promise<() => void> {
+  // Silenced logger — watcher is not an MCP server (stdout is safe), but
+  // we still don't want Baileys flooding our console output.
+  const logger = pino({ level: "silent" });
+
+  const authDir = resolveAuthDir();
+  const status: WatcherStatus = {
+    connected: false,
+    phoneNumber: null,
+    selfJid: null,
+    selfLid: null,
+  };
+
+  let sock: ReturnType<typeof makeWASocket> | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectAttempts = 0;
+  let permanentlyLoggedOut = false;
+  let stopped = false;
+
+  const MAX_RECONNECT_DELAY_MS = 60_000;
+
+  function scheduleReconnect(): void {
+    if (stopped || permanentlyLoggedOut || reconnectTimer) return;
+
+    reconnectAttempts++;
+    const delay = Math.min(
+      1_000 * Math.pow(2, reconnectAttempts - 1),
+      MAX_RECONNECT_DELAY_MS
+    );
+
+    process.stderr.write(
+      `[whazaa-watch] WhatsApp reconnecting in ${delay / 1_000}s (attempt ${reconnectAttempts})...\n`
+    );
+
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!stopped) {
+        openSocket().catch((err) => {
+          process.stderr.write(`[whazaa-watch] Reconnect error: ${err}\n`);
+        });
+      }
+    }, delay);
+  }
+
+  async function openSocket(): Promise<void> {
+    const { state: authState, saveCreds } = await useMultiFileAuthState(authDir);
+    const { version } = await fetchLatestBaileysVersion();
+
+    sock = makeWASocket({
+      auth: {
+        creds: authState.creds,
+        keys: makeCacheableSignalKeyStore(authState.keys, logger),
+      },
+      version,
+      browser: ["Whazaa-Watch", "cli", "0.1.0"],
+      printQRInTerminal: false,
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+      logger,
+    });
+
+    sock.ev.on("creds.update", saveCreds);
+
+    sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
+      if (qr) {
+        // The watcher should never need a QR — the MCP server handles initial
+        // pairing. If a QR appears it means credentials are stale.
+        process.stderr.write(
+          "[whazaa-watch] QR code requested — credentials may be stale. " +
+          "Run 'npx whazaa setup' to re-pair.\n"
+        );
+      }
+
+      if (connection === "open") {
+        status.connected = true;
+        reconnectAttempts = 0;
+
+        const jid = sock?.user?.id ?? null;
+        if (jid) {
+          const number = jid.split(":")[0].split("@")[0];
+          status.phoneNumber = number;
+          status.selfJid = `${number}@s.whatsapp.net`;
+        }
+        const lid = (sock?.user as unknown as Record<string, unknown>)?.lid as string | undefined;
+        if (lid) {
+          status.selfLid = lid;
+        }
+
+        process.stderr.write(
+          `[whazaa-watch] WhatsApp connected. Phone: +${status.phoneNumber ?? "unknown"}\n`
+        );
+      }
+
+      if (connection === "close") {
+        status.connected = false;
+
+        const statusCode =
+          (lastDisconnect?.error as { output?: { statusCode?: number } })?.output
+            ?.statusCode;
+
+        if (statusCode === DisconnectReason.loggedOut) {
+          permanentlyLoggedOut = true;
+          process.stderr.write(
+            "[whazaa-watch] Logged out (401). Run 'npx whazaa setup' to re-pair.\n"
+          );
+          return;
+        }
+
+        if (!stopped) {
+          process.stderr.write("[whazaa-watch] Connection closed. Will reconnect...\n");
+          scheduleReconnect();
+        }
+      }
+    });
+
+    sock.ev.on("messages.upsert", ({ messages }) => {
+      // Only process messages after we know our own JID
+      if (!status.selfJid && !status.selfLid && !status.phoneNumber) return;
+
+      const stripDevice = (jid: string) => jid.replace(/:\d+@/, "@");
+      const selfLid = status.selfLid ? stripDevice(status.selfLid) : null;
+
+      for (const msg of messages) {
+        const remoteJid = msg.key?.remoteJid;
+        const body =
+          msg.message?.conversation ??
+          msg.message?.extendedTextMessage?.text ??
+          null;
+
+        if (!body || !remoteJid) continue;
+
+        // Filter to self-chat only: match selfJid, selfLid, or phone number prefix
+        const remoteJidNorm = stripDevice(remoteJid);
+        const isSelfChat =
+          (status.selfJid && remoteJidNorm === stripDevice(status.selfJid)) ||
+          (selfLid && remoteJidNorm === selfLid) ||
+          (status.phoneNumber && remoteJid.startsWith(status.phoneNumber));
+
+        if (!isSelfChat) continue;
+
+        const msgId = msg.key?.id ?? "";
+        onMessage(body, msgId);
+      }
+    });
+  }
+
+  // Start the initial connection
+  await openSocket().catch((err) => {
+    process.stderr.write(`[whazaa-watch] Initial connect error: ${err}\n`);
+    scheduleReconnect();
+  });
+
+  // Return cleanup function
+  return function cleanup(): void {
+    stopped = true;
+
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
+    if (sock) {
+      try {
+        sock.end(undefined);
+      } catch {
+        // Ignore
+      }
+      sock = null;
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Recent-body deduplication window
+// ---------------------------------------------------------------------------
+// When the direct WhatsApp connection delivers a message, trackBody() records
+// it here. The log-file fallback poller checks this set before delivering so
+// that a message arriving via both paths is only typed into iTerm2 once.
+// Entries are evicted after 30 seconds.
+// ---------------------------------------------------------------------------
+
+const recentBodies = new Set<string>();
+
+function trackBody(body: string): void {
+  recentBodies.add(body);
+  setTimeout(() => recentBodies.delete(body), 30_000);
+}
+
 // --- Main loop ---------------------------------------------------------------
 
-export async function watch(rawSessionId: string): Promise<void> {
-  // Strip the iTerm2 prefix (e.g. "w1t1p0:GUID" → "GUID")
-  let activeSessionId = rawSessionId.includes(":")
-    ? rawSessionId.split(":").pop()!
-    : rawSessionId;
+export async function watch(rawSessionId?: string): Promise<void> {
+  // Strip the iTerm2 prefix (e.g. "w1t1p0:GUID" -> "GUID") or start with no cached session
+  let activeSessionId = rawSessionId
+    ? rawSessionId.includes(":") ? rawSessionId.split(":").pop()! : rawSessionId
+    : "";
 
   const config = resolveConfig(activeSessionId);
 
-  // Ensure log file exists and is empty
-  writeFileSync(config.logFile, "");
+  const mcpRunning = isMcpServerRunning();
+  const mode = mcpRunning ? "Log-file only (MCP server active)" : "Direct WhatsApp + log-file fallback";
 
   console.log(`Whazaa Watch`);
   console.log(`  Session:  ${activeSessionId}`);
   console.log(`  Log file: ${config.logFile}`);
   console.log(`  Interval: ${config.pollInterval / 1_000}s`);
-  console.log(`  Mode:     Smart (auto-find/create claude sessions)`);
-  console.log(`\nWaiting for messages...\n`);
+  console.log(`  Mode:     ${mode}`);
+  console.log();
 
-  let seen = 0;
   let consecutiveFailures = 0;
 
+  // Log-file: read current line count so we don't replay old messages.
+  // We don't truncate — the MCP server writes to this file and owns it.
+  let seen = 0;
+  if (existsSync(config.logFile)) {
+    try {
+      const content = readFileSync(config.logFile, "utf-8");
+      seen = content.split("\n").filter(Boolean).length;
+      process.stderr.write(
+        `[whazaa-watch] Log file has ${seen} existing lines — skipping them.\n`
+      );
+    } catch {
+      // If we can't read it, start from 0 (may replay a few messages on startup)
+    }
+  }
+
   // Graceful shutdown
+  let cleanupWatcher: (() => void) | null = null;
   const cleanup = (signal: string) => {
     console.log(`\n[whazaa-watch] ${signal} received. Stopping.`);
+    if (cleanupWatcher) cleanupWatcher();
     process.exit(0);
   };
   process.on("SIGINT", () => cleanup("SIGINT"));
   process.on("SIGTERM", () => cleanup("SIGTERM"));
 
   /**
-   * Smart delivery: try to type into a session, with fallback chain.
-   *   1. Try active session
-   *   2. Find any claude session
-   *   3. Create new claude session
+   * Smart delivery: type message into the active Claude session.
+   *
+   * The watcher ALWAYS delivers to iTerm2 — it is the sole delivery mechanism.
+   * The MCP server handles the WhatsApp connection (sending/receiving), but the
+   * watcher is what actually types messages into the Claude terminal.
+   *
+   *   1. If cached session exists AND Claude is running there → type into it
+   *   2. Search all iTerm2 sessions for one running Claude → type into it
+   *   3. Otherwise → create a new Claude session and type into that
    */
   function deliverMessage(text: string): boolean {
-    // Attempt 1: try current active session
-    if (typeIntoSession(activeSessionId, text)) {
-      consecutiveFailures = 0;
-      return true;
+    // Attempt 1: try the cached session (if we have one), but only if Claude
+    // is actually running there.
+    if (activeSessionId && isClaudeRunningInSession(activeSessionId)) {
+      if (typeIntoSession(activeSessionId, text)) {
+        consecutiveFailures = 0;
+        return true;
+      }
     }
 
     process.stderr.write(
-      `[whazaa-watch] Session ${activeSessionId} not found. Searching for claude...\n`
+      `[whazaa-watch] ${activeSessionId ? `Session ${activeSessionId} is not running Claude.` : "No cached session."} Searching for another...\n`
     );
 
-    // Attempt 2: find any existing claude session
+    // Attempt 2: search all iTerm2 sessions for one actually running Claude.
+    // findClaudeSession() matches tab titles containing "claude", but we gate
+    // each match with isClaudeRunningInSession() to skip stale tabs.
     const found = findClaudeSession();
-    if (found) {
+    process.stderr.write(
+      `[whazaa-watch] findClaudeSession() returned: ${found ?? "null"}\n`
+    );
+    if (found && isClaudeRunningInSession(found)) {
       activeSessionId = found;
-      process.stderr.write(
-        `[whazaa-watch] Retargeted to session: ${activeSessionId}\n`
-      );
       if (typeIntoSession(activeSessionId, text)) {
         consecutiveFailures = 0;
         return true;
       }
     }
 
-    // Attempt 2b: retry after a short delay (AppleScript may need time after launchd start)
     process.stderr.write(
-      "[whazaa-watch] Retrying session search after delay...\n"
+      `[whazaa-watch] No running Claude session found. Starting new one...\n`
     );
-    spawnSync("sleep", ["2"]);
-    const retryFound = findClaudeSession();
-    if (retryFound) {
-      activeSessionId = retryFound;
-      process.stderr.write(
-        `[whazaa-watch] Retargeted to session: ${activeSessionId}\n`
-      );
-      if (typeIntoSession(activeSessionId, text)) {
-        consecutiveFailures = 0;
-        return true;
-      }
-    }
 
-    // Attempt 3: create a new claude session
-    process.stderr.write(
-      "[whazaa-watch] No claude session found. Starting new one...\n"
-    );
+    // Attempt 3: create a fresh Claude session
     const created = createClaudeSession();
     if (created) {
       activeSessionId = created;
@@ -297,7 +602,60 @@ export async function watch(rawSessionId: string): Promise<void> {
     return false;
   }
 
-  // Poll loop
+  // --- Mode selection: direct WhatsApp or log-file only ----------------------
+  //
+  // Only one Baileys instance can use the same auth credentials at a time.
+  // When the MCP server is running (it owns the WhatsApp connection for
+  // sending), the watcher must NOT connect — it reads the log file instead.
+  // When the MCP server is NOT running, the watcher connects directly.
+  //
+  // The watcher re-checks every 30 seconds and switches mode as needed.
+
+  let directMode = !mcpRunning;
+
+  if (directMode) {
+    console.log(`Connecting to WhatsApp...\n`);
+    cleanupWatcher = await connectWatcher((body: string, _msgId: string) => {
+      trackBody(body);
+      console.log(`[whazaa-watch] (direct) -> ${body}`);
+      deliverMessage(body);
+    });
+  } else {
+    console.log(`Waiting for messages (via MCP server log)...\n`);
+  }
+
+  // Periodically re-check whether the MCP server started/stopped
+  setInterval(async () => {
+    const mcpNow = isMcpServerRunning();
+
+    if (directMode && mcpNow) {
+      // MCP server just started — disconnect watcher to avoid conflict
+      process.stderr.write(
+        "[whazaa-watch] MCP server detected — switching to log-file mode.\n"
+      );
+      if (cleanupWatcher) {
+        cleanupWatcher();
+        cleanupWatcher = null;
+      }
+      directMode = false;
+    } else if (!directMode && !mcpNow) {
+      // MCP server stopped — watcher takes over WhatsApp directly
+      process.stderr.write(
+        "[whazaa-watch] MCP server gone — connecting to WhatsApp directly.\n"
+      );
+      directMode = true;
+      cleanupWatcher = await connectWatcher((body: string, _msgId: string) => {
+        trackBody(body);
+        console.log(`[whazaa-watch] (direct) -> ${body}`);
+        deliverMessage(body);
+      });
+    }
+  }, 30_000);
+
+  // --- Log-file polling (always active) --------------------------------------
+  // In direct mode: fallback for messages written by MCP server.
+  // In log-file mode: primary message source.
+
   setInterval(() => {
     if (!existsSync(config.logFile)) return;
 
@@ -317,7 +675,17 @@ export async function watch(rawSessionId: string): Promise<void> {
       const msg = line.replace(/^\[[^\]]*\]\s*/, "");
       if (!msg) continue;
 
-      console.log(`[whazaa-watch] → ${msg}`);
+      // Deduplicate: if the direct WhatsApp connection already delivered this
+      // message body (within the last 30 seconds), skip it here.
+      if (recentBodies.has(msg)) {
+        process.stderr.write(
+          `[whazaa-watch] (log) skipping duplicate: ${msg.slice(0, 60)}\n`
+        );
+        continue;
+      }
+
+      const source = directMode ? "fallback" : "log";
+      console.log(`[whazaa-watch] (${source}) -> ${msg}`);
       deliverMessage(msg);
     }
 

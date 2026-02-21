@@ -19,7 +19,7 @@
  */
 
 import { execSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -35,6 +35,7 @@ import {
   waitForConnection,
   waitForLogout,
   waitForQR,
+  registerShutdownHandlers,
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 import { watch } from "./watch.js";
@@ -467,14 +468,7 @@ async function main(): Promise<void> {
 
   if (process.argv.includes("watch")) {
     const watchIdx = process.argv.indexOf("watch");
-    const sessionId = process.argv[watchIdx + 1];
-    if (!sessionId) {
-      console.error("Usage: whazaa watch <iterm-session-id>");
-      console.error("");
-      console.error("The session ID is available as $ITERM_SESSION_ID in iTerm2.");
-      console.error("Example: whazaa watch w1t1p0:9E273A47-BAAF-499E-9AF4-AAC5997FFF5E");
-      process.exit(1);
-    }
+    const sessionId = process.argv[watchIdx + 1]; // optional — watcher discovers dynamically
     await watch(sessionId);
     return;
   }
@@ -482,6 +476,20 @@ async function main(): Promise<void> {
   // Kill stale Whazaa MCP server instances before starting.
   // Multiple instances compete for the same WhatsApp auth and cause disconnects.
   killStaleInstances();
+
+  // Register shutdown handlers for the MCP server process only.
+  // The watcher registers its own handlers; whatsapp.ts no longer does this
+  // at module scope to avoid side effects when imported by the watcher.
+  registerShutdownHandlers();
+
+  // Write PID file so the watcher knows the MCP server is running and won't
+  // compete for the same WhatsApp auth credentials.
+  const MCP_PID_FILE = "/tmp/whazaa-mcp.pid";
+  writeFileSync(MCP_PID_FILE, String(process.pid));
+  const removePidFile = () => {
+    try { unlinkSync(MCP_PID_FILE); } catch { /* ignore */ }
+  };
+  process.on("exit", removePidFile);
 
   // Start WhatsApp connection in the background.
   // initialize() resolves once connected OR once a QR code has been emitted,

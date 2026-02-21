@@ -499,5 +499,13 @@ function shutdown(signal: string): void {
   process.exit(0);
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+/**
+ * Register SIGINT/SIGTERM handlers for graceful shutdown.
+ * Call this only from the MCP server path — NOT from the watcher process.
+ * (The watcher registers its own handlers and importing whatsapp.ts should
+ * not add handlers as a module-level side effect.)
+ */
+export function registerShutdownHandlers(): void {
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
