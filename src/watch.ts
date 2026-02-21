@@ -14,7 +14,6 @@
  * Environment variables:
  *   WHAZAA_LOG            Path to incoming message log (default: /tmp/whazaa-incoming.log)
  *   WHAZAA_POLL_INTERVAL  Seconds between checks (default: 2)
- *   WHAZAA_PREFIX         Message prefix (default: empty)
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -27,7 +26,6 @@ interface WatchConfig {
   sessionId: string;
   logFile: string;
   pollInterval: number;
-  prefix: string;
 }
 
 function resolveConfig(sessionId: string): WatchConfig {
@@ -36,7 +34,6 @@ function resolveConfig(sessionId: string): WatchConfig {
     logFile: process.env.WHAZAA_LOG || "/tmp/whazaa-incoming.log",
     pollInterval:
       (parseInt(process.env.WHAZAA_POLL_INTERVAL || "2", 10) || 2) * 1_000,
-    prefix: process.env.WHAZAA_PREFIX || "",
   };
 }
 
@@ -208,7 +205,6 @@ export async function watch(rawSessionId: string): Promise<void> {
   console.log(`  Session:  ${activeSessionId}`);
   console.log(`  Log file: ${config.logFile}`);
   console.log(`  Interval: ${config.pollInterval / 1_000}s`);
-  console.log(`  Prefix:   ${config.prefix || "(none)"}`);
   console.log(`  Mode:     Smart (auto-find/create claude sessions)`);
   console.log(`\nWaiting for messages...\n`);
 
@@ -312,8 +308,7 @@ export async function watch(rawSessionId: string): Promise<void> {
       if (!msg) continue;
 
       console.log(`[whazaa-watch] → ${msg}`);
-      const text = config.prefix ? `${config.prefix} ${msg}` : msg;
-      deliverMessage(text);
+      deliverMessage(msg);
     }
 
     seen = lines.length;
