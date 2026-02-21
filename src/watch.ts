@@ -1028,8 +1028,6 @@ export async function watch(rawSessionId?: string): Promise<void> {
    * When the user sends /sessions, we store the listed sessions here so
    * the next message (a number) can be interpreted as a selection.
    */
-  let pendingSessionList: Array<{ id: string; name: string; path: string }> | null = null;
-
   // Graceful shutdown
   let cleanupWatcher: (() => void) | null = null;
   let ipcServer: Server | null = null;
@@ -1069,41 +1067,37 @@ export async function watch(rawSessionId?: string): Promise<void> {
       return;
     }
 
-    // --- /sessions (aliases: /s) ---------------------------------------------
+    // --- /sessions (aliases: /s) — list sessions ------------------------------
     if (trimmedText === "/sessions" || trimmedText === "/s") {
       const sessions = listClaudeSessions();
       if (sessions.length === 0) {
         watcherSendMessage("No Claude sessions found.").catch(() => {});
         return;
       }
-      pendingSessionList = sessions;
       const lines = sessions.map((s, i) => {
         const label = s.path ? s.path.replace(homedir(), "~") : s.name;
         return `*${i + 1}.* ${label}`;
       });
-      const reply = `*Open Claude sessions:*\n${lines.join("\n")}\n\nReply with a number to switch.`;
+      const reply = `*Open Claude sessions:*\n${lines.join("\n")}\n\nSwitch with */1*, */2*, etc.`;
       watcherSendMessage(reply).catch(() => {});
       return;
     }
 
-    // --- numeric reply to /sessions prompt ----------------------------------
-    if (pendingSessionList !== null) {
-      const trimmed = text.trim().toLowerCase();
-
-      // Cancel commands
-      if (trimmed === "0" || trimmed === "cancel" || trimmed === "c" || trimmed === "back") {
-        pendingSessionList = null;
-        watcherSendMessage("Session selection cancelled.").catch(() => {});
+    // --- /N — switch to session N (e.g. /1, /2, /3) -------------------------
+    const sessionSwitchMatch = trimmedText.match(/^\/(\d+)$/);
+    if (sessionSwitchMatch) {
+      const num = parseInt(sessionSwitchMatch[1], 10);
+      const sessions = listClaudeSessions();
+      if (sessions.length === 0) {
+        watcherSendMessage("No Claude sessions found.").catch(() => {});
         return;
       }
-
-      const num = parseInt(trimmed, 10);
-      if (!isNaN(num) && num >= 1 && num <= pendingSessionList.length) {
-        const chosen = pendingSessionList[num - 1];
-        pendingSessionList = null;
-
-        // Focus the chosen session in iTerm2
-        const focusScript = `
+      if (num < 1 || num > sessions.length) {
+        watcherSendMessage(`Invalid session number. Use /s to list (1-${sessions.length}).`).catch(() => {});
+        return;
+      }
+      const chosen = sessions[num - 1];
+      const focusScript = `
 tell application "iTerm2"
   repeat with aWindow in windows
     repeat with aTab in tabs of aWindow
@@ -1117,20 +1111,16 @@ tell application "iTerm2"
   end repeat
   return "not_found"
 end tell`;
-
-        const focusResult = runAppleScript(focusScript);
-        if (focusResult === "focused") {
-          activeSessionId = chosen.id;
-          const label = chosen.path ? chosen.path.replace(homedir(), "~") : chosen.name;
-          process.stderr.write(`[whazaa-watch] /sessions: switched to session ${chosen.id} (${label})\n`);
-          watcherSendMessage(`Switched to *${label}*`).catch(() => {});
-        } else {
-          watcherSendMessage("Session not found — it may have closed.").catch(() => {});
-        }
-        return;
+      const focusResult = runAppleScript(focusScript);
+      if (focusResult === "focused") {
+        activeSessionId = chosen.id;
+        const label = chosen.path ? chosen.path.replace(homedir(), "~") : chosen.name;
+        process.stderr.write(`[whazaa-watch] /sessions: switched to session ${chosen.id} (${label})\n`);
+        watcherSendMessage(`Switched to *${label}*`).catch(() => {});
+      } else {
+        watcherSendMessage("Session not found — it may have closed.").catch(() => {});
       }
-      // Not a valid number — clear the pending list and fall through to normal delivery
-      pendingSessionList = null;
+      return;
     }
 
     // Dispatch to IPC clients (additive — does not replace iTerm2 delivery)
