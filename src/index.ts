@@ -18,7 +18,7 @@
  * In setup mode stdout is the terminal — console.log is safe to use.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -31,6 +31,7 @@ import {
   drainMessages,
   triggerLogin,
   waitForConnection,
+  waitForLogout,
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR } from "./auth.js";
 
@@ -97,29 +98,35 @@ async function setup(): Promise<void> {
     existsSync(authDir) && readdirSync(authDir).some((f) => f === "creds.json");
 
   if (alreadyPaired) {
-    // If we already have credentials on disk, we're paired (or were previously).
-    // Still start the connection so we can confirm.
+    // Credentials exist — try to connect. If 401 (logged out), wipe and re-pair.
     console.log("\nExisting session found — verifying connection...");
-    initialize().catch(() => {
-      // Ignore init errors during setup; we'll report via getStatus below.
-    });
-    const phoneNumber = await waitForConnection();
-    console.log(`\nConnected to WhatsApp as +${phoneNumber}`);
-    console.log("\nSetup complete! Restart Claude Code and Whazaa will be ready.");
-    process.exit(0);
+    initialize().catch(() => {});
+
+    // Race: either we connect, or we get logged out (401)
+    const result = await Promise.race([
+      waitForConnection().then((phone) => ({ ok: true as const, phone })),
+      waitForLogout().then(() => ({ ok: false as const })),
+    ]);
+
+    if (result.ok) {
+      console.log(`\nConnected to WhatsApp as +${result.phone}`);
+      console.log("\nSetup complete! Restart Claude Code and Whazaa will be ready.");
+      process.exit(0);
+    }
+
+    // 401 — stale credentials, wipe and re-pair
+    console.log("\nSession expired. Clearing old credentials and re-pairing...\n");
+    rmSync(authDir, { recursive: true, force: true });
   }
 
   // ------------------------------------------------------------------
   // Step 3: First-time pairing — show QR code
   // ------------------------------------------------------------------
-  console.log("\nScan the QR code below with WhatsApp:");
-  console.log("  Open WhatsApp -> Linked Devices -> Link a Device\n");
+  console.log("Scan the QR code in your browser with WhatsApp:");
+  console.log("  Settings -> Linked Devices -> Link a Device\n");
 
-  // initialize() resolves once QR is shown OR connected.
-  // We call it to trigger the QR display, then wait for full connection.
-  initialize().catch(() => {
-    // Errors are written to stderr; don't crash the setup flow.
-  });
+  // Use triggerLogin() instead of initialize() — it resets the permanentlyLoggedOut flag
+  triggerLogin().catch(() => {});
 
   const phoneNumber = await waitForConnection();
   cleanupQR();
@@ -129,6 +136,53 @@ async function setup(): Promise<void> {
   // ------------------------------------------------------------------
   console.log(`\nConnected to WhatsApp as +${phoneNumber}`);
   console.log("\nSetup complete! Restart Claude Code and Whazaa will be ready.");
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall
+// ---------------------------------------------------------------------------
+
+async function uninstall(): Promise<void> {
+  console.log("Whazaa Uninstall\n");
+
+  // Remove from ~/.claude/.mcp.json
+  const mcpPath = join(homedir(), ".claude", ".mcp.json");
+  if (existsSync(mcpPath)) {
+    try {
+      const config = JSON.parse(readFileSync(mcpPath, "utf-8"));
+      if (config.mcpServers?.whazaa) {
+        delete config.mcpServers.whazaa;
+        writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
+        console.log("Removed Whazaa from ~/.claude/.mcp.json");
+      } else {
+        console.log("Whazaa not found in ~/.claude/.mcp.json");
+      }
+    } catch {
+      console.log("Warning: could not parse ~/.claude/.mcp.json");
+    }
+  }
+
+  // Remove auth credentials
+  const authDir = resolveAuthDir();
+  if (existsSync(authDir)) {
+    rmSync(authDir, { recursive: true, force: true });
+    console.log("Removed auth credentials from " + authDir);
+  }
+
+  // Remove parent ~/.whazaa if empty
+  const whazaaDir = join(homedir(), ".whazaa");
+  if (existsSync(whazaaDir)) {
+    try {
+      const remaining = readdirSync(whazaaDir);
+      if (remaining.length === 0) {
+        rmSync(whazaaDir, { recursive: true });
+        console.log("Removed ~/.whazaa/");
+      }
+    } catch { /* ignore */ }
+  }
+
+  console.log("\nWhazaa has been uninstalled. Restart Claude Code to apply.");
   process.exit(0);
 }
 
@@ -280,7 +334,12 @@ async function main(): Promise<void> {
   // e.g.: npx whazaa setup   or   npx -y whazaa setup
   if (process.argv.includes("setup")) {
     await setup();
-    return; // setup() calls process.exit(), but return here for clarity
+    return;
+  }
+
+  if (process.argv.includes("uninstall")) {
+    await uninstall();
+    return;
   }
 
   // Default: Start WhatsApp connection in the background.

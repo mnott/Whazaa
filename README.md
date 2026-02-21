@@ -20,44 +20,29 @@ You message yourself on WhatsApp, Claude receives it. Claude responds, you see i
 
 ## Quick Start
 
-### Option 1: Run directly with npx / bunx
-
-No installation required:
+One command does everything — configures Claude Code, opens a QR code in your browser, and pairs with WhatsApp:
 
 ```bash
-npx whazaa
+npx -y whazaa setup
 ```
 
-or with Bun:
-
-```bash
-bunx whazaa
-```
-
-The first run prints a QR code to your terminal. Scan it with WhatsApp (Settings -> Linked Devices -> Link a Device). Credentials are saved to `~/.whazaa/auth/` and all subsequent runs connect automatically.
-
-### Option 2: Install globally
-
-```bash
-npm install -g whazaa
-whazaa
-```
-
-### Option 3: Build from source
-
-```bash
-git clone https://github.com/mnott/Whazaa.git
-cd whazaa
-npm install
-npm run build
-node dist/index.js
-```
+That's it. Restart Claude Code and you're connected.
 
 ---
 
-## Claude Code MCP Configuration
+## What `setup` does
 
-Add Whazaa to `~/.claude/.mcp.json` (or your project's `.mcp.json`):
+1. Creates (or updates) `~/.claude/.mcp.json` with the Whazaa MCP entry
+2. Opens a QR code in your browser
+3. You scan it with WhatsApp (Settings → Linked Devices → Link a Device)
+4. Pairing completes, credentials are saved to `~/.whazaa/auth/`
+5. Restart Claude Code — Whazaa connects automatically from now on
+
+---
+
+## Manual Configuration
+
+If you prefer to configure manually, add Whazaa to `~/.claude/.mcp.json` (or your project's `.mcp.json`):
 
 ### Using npx (always latest version)
 
@@ -146,32 +131,11 @@ Whazaa uses the [Baileys](https://github.com/WhiskeySockets/Baileys) library to 
 
 ---
 
-## First-Time Pairing
-
-1. Run Whazaa from a terminal so you can see the QR code:
-   ```bash
-   npx whazaa
-   ```
-
-2. A QR code prints on stderr. Open WhatsApp on your phone:
-   - iOS: Settings -> Linked Devices -> Link a Device
-   - Android: Menu (three dots) -> Linked Devices -> Link a Device
-
-3. Scan the QR code. Whazaa logs `Connected. Phone: +XXXXXXXXXXX`.
-
-4. Add the MCP config to Claude Code. Credentials are now saved; subsequent connections are automatic.
-
----
-
 ## Troubleshooting
-
-**QR code not appearing**
-
-Run Whazaa directly from a terminal (`npx whazaa`) rather than from within Claude Code's MCP runner, which may not show stderr. Once paired, restart Claude Code.
 
 **"Logged out (401)" error**
 
-Your session was invalidated (e.g. you unlinked the device in WhatsApp). Use the `whatsapp_login` tool or delete `~/.whazaa/auth/` and restart Whazaa to re-pair.
+Your session was invalidated (e.g. you unlinked the device in WhatsApp). Run `npx -y whazaa setup` again to re-pair.
 
 **Messages not received**
 

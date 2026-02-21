@@ -72,6 +72,9 @@ let initResolve: (() => void) | null = null;
 /** Resolve when the connection is fully open (used by setup mode) */
 let connectedResolve: ((phoneNumber: string) => void) | null = null;
 
+/** Resolve when permanently logged out / 401 (used by setup mode) */
+let logoutResolve: (() => void) | null = null;
+
 // --- Internal helpers --------------------------------------------------------
 
 /**
@@ -214,6 +217,11 @@ async function connect(): Promise<void> {
           "[whazaa] Logged out (401). Run whatsapp_login to re-pair.\n"
         );
 
+        if (logoutResolve) {
+          logoutResolve();
+          logoutResolve = null;
+        }
+
         if (initResolve) {
           initResolve();
           initResolve = null;
@@ -298,6 +306,19 @@ export function waitForConnection(): Promise<string> {
   }
   return new Promise<string>((resolve) => {
     connectedResolve = resolve;
+  });
+}
+
+/**
+ * Returns a promise that resolves when a 401 (logged out) is detected.
+ * Used by setup mode to detect stale credentials.
+ */
+export function waitForLogout(): Promise<void> {
+  if (permanentlyLoggedOut) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    logoutResolve = resolve;
   });
 }
 
