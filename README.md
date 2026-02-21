@@ -159,7 +159,7 @@ After relocating, subsequent messages are delivered to the new session.
 
 ### /sessions
 
-Reply `/s` to get a numbered list of open Claude sessions with their working directories. Reply with a number to switch the active session. Reply `0` or `cancel` to abort.
+Reply `/s` to get a numbered list of open Claude sessions with their working directories. Switch with `/1`, `/2`, etc.
 
 ---
 
