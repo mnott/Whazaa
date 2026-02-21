@@ -135,6 +135,11 @@ async function setup(): Promise<void> {
   // Step 4: Success
   // ------------------------------------------------------------------
   console.log(`\nConnected to WhatsApp as +${phoneNumber}`);
+  console.log("Finishing sync with WhatsApp...");
+
+  // Keep the connection alive briefly so WhatsApp completes the device handshake
+  await new Promise((resolve) => setTimeout(resolve, 5_000));
+
   console.log("\nSetup complete! Restart Claude Code and Whazaa will be ready.");
   process.exit(0);
 }
