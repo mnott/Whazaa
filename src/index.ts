@@ -18,6 +18,7 @@
  * In setup mode stdout is the terminal — console.log is safe to use.
  */
 
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -371,6 +372,39 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Stale instance cleanup
+// ---------------------------------------------------------------------------
+
+/**
+ * Kill any other Whazaa MCP server processes (not watch mode, not ourselves).
+ * Multiple instances compete for the same WhatsApp auth credentials and cause
+ * connection failures. This ensures only one MCP server is active at a time.
+ */
+function killStaleInstances(): void {
+  const myPid = process.pid;
+  try {
+    // Find all node processes running Whazaa's index.js (excluding watch mode)
+    const output = execSync(
+      `ps ax -o pid,args | grep '[d]ist/index.js' | grep -v ' watch '`,
+      { encoding: "utf-8", timeout: 5_000 },
+    );
+
+    for (const line of output.trim().split("\n")) {
+      const pid = parseInt(line.trim(), 10);
+      if (!pid || pid === myPid) continue;
+      try {
+        process.kill(pid, "SIGTERM");
+        process.stderr.write(`[whazaa] Killed stale instance (PID ${pid})\n`);
+      } catch {
+        // Process already exited — ignore
+      }
+    }
+  } catch {
+    // No matches or command failed — nothing to clean up
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -401,7 +435,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Default: Start WhatsApp connection in the background.
+  // Kill stale Whazaa MCP server instances before starting.
+  // Multiple instances compete for the same WhatsApp auth and cause disconnects.
+  killStaleInstances();
+
+  // Start WhatsApp connection in the background.
   // initialize() resolves once connected OR once a QR code has been emitted,
   // so the MCP server is immediately available for tool calls in both cases.
   initialize().catch((err) => {
