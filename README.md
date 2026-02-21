@@ -98,6 +98,20 @@ The session ID is available as `$ITERM_SESSION_ID` in any iTerm2 shell. The `w1t
 pkill -f "whazaa.*watch"
 ```
 
+### Configuring Claude to reply on WhatsApp
+
+When the watcher types a message into your terminal, Claude sees it as regular user input prefixed with `[WhatsApp]`. By default, Claude won't know to reply on WhatsApp unless you tell it.
+
+Add this to your project's `CLAUDE.md` (or `~/.claude/CLAUDE.md` for global config):
+
+```markdown
+## WhatsApp Integration
+
+When you receive user input prefixed with `[WhatsApp]`, the message is from the user's
+phone via WhatsApp. Always respond via the `whatsapp_send` MCP tool in addition to the
+terminal so the user sees your reply on their phone.
+```
+
 ### Configuration
 
 | Variable | Default | Description |
