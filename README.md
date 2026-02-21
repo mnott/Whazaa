@@ -40,6 +40,16 @@ That's it. Restart Claude Code and you're connected.
 
 ---
 
+## Uninstall
+
+```bash
+npx -y whazaa uninstall
+```
+
+This removes Whazaa from `~/.claude/.mcp.json` and deletes stored credentials from `~/.whazaa/`. Restart Claude Code to apply.
+
+---
+
 ## Manual Configuration
 
 If you prefer to configure manually, add Whazaa to `~/.claude/.mcp.json` (or your project's `.mcp.json`):
