@@ -171,6 +171,41 @@ The watcher maintains a separate incoming message queue for each registered sess
 
 ---
 
+## Best practices for CLAUDE.md
+
+To get the most out of Whazaa, add these rules to your `CLAUDE.md` (or `~/.claude/CLAUDE.md` for global config):
+
+### Mirror every response to WhatsApp
+
+Tell Claude to send the same content it prints on the terminal to WhatsApp, so you can follow along from your phone:
+
+```
+Every response you give on the terminal MUST also be sent to WhatsApp via whatsapp_send.
+Send the same content — do not shorten or paraphrase.
+Adapt markdown for WhatsApp: use **bold** and *italic* only. No headers, no code blocks.
+```
+
+### Acknowledge before long tasks
+
+If Claude is about to spawn agents, read multiple files, or do anything that takes more than a few seconds, it should send a brief WhatsApp message **first** — before calling any other tools. Otherwise your phone goes silent and you don't know if Claude heard you.
+
+```
+If a task will take more than a few seconds, your FIRST tool call must be
+whatsapp_send with a brief acknowledgment (e.g. "On it — researching that now.").
+Then proceed with the actual work. Never leave WhatsApp silent while working.
+```
+
+### Drain the queue at session start
+
+Messages you send from your phone while Claude is generating a response may be queued. Call `whatsapp_receive` early in each session to catch them:
+
+```
+At the start of every session, call whatsapp_receive to drain any queued
+messages that arrived while you were offline.
+```
+
+---
+
 ## Configuration
 
 | Variable | Default | Description |
