@@ -63,7 +63,9 @@ Just say something like:
 
 ---
 
-## Terminal Watcher (iTerm2)
+## Terminal Watcher (macOS + iTerm2)
+
+> **Platform:** The watcher currently requires **macOS** with **iTerm2**. It uses AppleScript (`osascript`) to type into a specific iTerm2 session. Terminal.app and non-macOS platforms are not yet supported — contributions welcome.
 
 The `watch` command bridges WhatsApp messages directly into a Claude Code terminal session. Incoming messages are typed into the terminal via AppleScript automation — Claude sees them as regular user input.
 
@@ -240,8 +242,8 @@ Set `WHAZAA_AUTH_DIR` to a different directory for each account and run separate
 ## Requirements
 
 - Node.js >= 18
-- macOS with iTerm2 (for the `watch` command)
 - WhatsApp account with multi-device support
+- **For the `watch` command:** macOS with [iTerm2](https://iterm2.com/) (uses AppleScript to type into terminal sessions)
 
 ---
 
