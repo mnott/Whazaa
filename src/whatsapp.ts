@@ -79,6 +79,9 @@ let connectedResolve: ((phoneNumber: string) => void) | null = null;
 /** Resolve when permanently logged out / 401 (used by setup mode) */
 let logoutResolve: (() => void) | null = null;
 
+/** Resolve when a QR code is emitted (used by setup mode to detect stale creds) */
+let qrResolve: (() => void) | null = null;
+
 // --- Internal helpers --------------------------------------------------------
 
 /**
@@ -168,6 +171,12 @@ async function connect(): Promise<void> {
       if (initResolve) {
         initResolve();
         initResolve = null;
+      }
+
+      // Notify setup mode that a QR was emitted (signals stale/invalid creds)
+      if (qrResolve) {
+        qrResolve();
+        qrResolve = null;
       }
     }
 
@@ -327,6 +336,17 @@ export function waitForLogout(): Promise<void> {
   }
   return new Promise<void>((resolve) => {
     logoutResolve = resolve;
+  });
+}
+
+/**
+ * Returns a promise that resolves when Baileys emits a QR code.
+ * Used by setup mode to detect that existing credentials are stale
+ * (a QR appearing during reconnect means the saved session is invalid).
+ */
+export function waitForQR(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    qrResolve = resolve;
   });
 }
 
