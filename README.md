@@ -1,142 +1,200 @@
 # Whazaa
 
-WhatsApp MCP server for Claude Code — bidirectional self-chat messaging with terminal integration.
-
-You message yourself on WhatsApp, Claude receives it. Claude responds, you see it on WhatsApp. Your phone becomes a parallel terminal.
+WhatsApp bridge for Claude Code. You message yourself on WhatsApp, Claude receives it. Claude responds, you see it on WhatsApp. Your phone becomes a parallel terminal.
 
 ---
 
-## Features
+## How it works
 
-- **Bidirectional messaging** — send from Claude, receive from your phone
-- **Terminal watcher** — incoming messages are typed directly into your Claude Code session via iTerm2
-- **Zero configuration** — auto-detects your phone number after first scan
-- **First-run QR pairing** — scan once, connects automatically thereafter
-- **Markdown support** — `**bold**`, `*italic*`, `` `code` `` converted to WhatsApp format
-- **Deduplication** — outgoing messages never echo back as incoming
-- **Exponential backoff** — reconnects automatically (1s to 60s)
-- **MCP-safe** — all output except JSON-RPC goes to stderr
+Whazaa has two components:
+
+**Watcher daemon** — a long-running process that owns the WhatsApp connection (via the [Baileys](https://github.com/WhiskeySockets/Baileys) library). It delivers incoming messages to iTerm2 by typing them into your Claude session via AppleScript. It also serves a Unix Domain Socket so MCP server instances can send and receive messages without holding their own connection.
+
+**MCP server** — a thin IPC proxy started by Claude Code. It has no direct WhatsApp connection. Every tool call is forwarded to the watcher over the socket and the response returned to Claude.
+
+```
+Your phone
+    |
+    | WhatsApp (Baileys WebSocket)
+    |
+  Watcher daemon  ←── launchd, auto-restarts
+    |
+    |── AppleScript ──> iTerm2 ──> Claude Code (types message into terminal)
+    |
+    |── Unix Domain Socket (/tmp/whazaa-watcher.sock)
+              |
+              └──> MCP Server (started by Claude Code)
+                       |
+                       └──> whatsapp_send / receive / status / wait / login
+```
+
+The separation means you can have multiple Claude Code sessions open simultaneously. Each MCP server instance registers its `TERM_SESSION_ID` with the watcher, and whichever session most recently sent a message becomes the active recipient for incoming messages.
 
 ---
 
-## Quick Start
+## Quick start
 
-One command does everything — configures Claude Code, opens a QR code in your browser, and pairs with WhatsApp:
+One command does everything:
 
 ```bash
 npx -y whazaa setup
 ```
 
-That's it. Restart Claude Code and you're connected.
+This will:
+1. Add Whazaa to `~/.claude/.mcp.json`
+2. Open a QR code in your browser
+3. You scan it with WhatsApp: Settings > Linked Devices > Link a Device
+4. Credentials are saved to `~/.whazaa/auth/`
+
+Restart Claude Code. Whazaa connects automatically from now on.
 
 ---
 
-## What `setup` does
+## MCP tools
 
-1. Creates (or updates) `~/.claude/.mcp.json` with the Whazaa MCP entry
-2. Opens a QR code in your browser
-3. You scan it with WhatsApp (Settings → Linked Devices → Link a Device)
-4. Pairing completes, credentials are saved to `~/.whazaa/auth/`
-5. Restart Claude Code — Whazaa connects automatically from now on
+Once configured, Claude Code has five tools available:
 
----
+| Tool | Description |
+|------|-------------|
+| `whatsapp_status` | Check connection state and phone number |
+| `whatsapp_send` | Send a message to your WhatsApp self-chat |
+| `whatsapp_receive` | Drain all queued incoming messages |
+| `whatsapp_wait` | Block until a message arrives (up to timeout) |
+| `whatsapp_login` | Trigger a new QR pairing flow |
 
-## Usage
+### whatsapp_send
 
-After setup, restart Claude Code. Whazaa connects automatically.
+Sends a message to your self-chat. Supports Markdown formatting converted to WhatsApp format:
 
-Messages go through your WhatsApp self-chat — the chat with yourself (sometimes called "Saved Messages" or "Message Yourself").
+- `**bold**` becomes `*bold*`
+- `*italic*` becomes `_italic_`
+- `` `code` `` becomes ` ```code``` `
 
-**Tell Claude to use WhatsApp:**
+### whatsapp_wait
 
-Just say something like:
-- "Message me on WhatsApp when you're done"
-- "Continue on WhatsApp"
-- "Listen on WhatsApp" — Claude will start the watcher and receive your messages as terminal input
+Efficient alternative to polling. Blocks the tool call until a message arrives or the timeout expires (default 120 seconds, max 300). Use this in the background while working:
 
-**Example:**
-1. In Claude Code: "Refactor the auth module and message me on WhatsApp when done"
-2. Walk away from your desk
-3. Claude finishes and WhatsApps you: "Done. What's next?"
-4. You reply from your phone: "Now run the tests"
-5. Claude reads your reply and runs the tests
-
----
-
-## Terminal Watcher (macOS + iTerm2)
-
-> **Platform:** The watcher currently requires **macOS** with **iTerm2**. It uses AppleScript (`osascript`) to type into a specific iTerm2 session. Terminal.app and non-macOS platforms are not yet supported — contributions welcome.
-
-The `watch` command bridges WhatsApp messages directly into a Claude Code terminal session. Incoming messages are typed into the terminal via AppleScript automation — Claude sees them as regular user input.
-
-### How it works
-
-1. Whazaa MCP server writes incoming messages to a log file
-2. The watcher polls the log for new lines (every 2 seconds)
-3. The watcher resolves the target iTerm2 session (see below)
-4. New messages are typed into that session via `osascript`
-5. Claude Code processes them as regular user input
-
-### Session resolution
-
-The watcher uses a fallback chain to find a usable iTerm2 session:
-
-1. **Try the specified session ID** — uses the session ID passed on the command line
-2. **Search by tab name** — if that session is gone, scans all iTerm2 sessions for one whose tab name contains "claude"
-3. **Retry after 2 seconds** — if still not found, waits and tries again (AppleScript may need a moment to connect when the watcher starts fresh from launchd)
-4. **Create a new tab** — if no session is found after the retry, opens a new iTerm2 tab, runs `claude`, waits for it to boot, then uses that session
-
-This means the watcher can recover automatically if you close and reopen your Claude Code tab, or if it was started before iTerm2 was fully ready.
-
-### Managing the watcher
-
-Claude Code manages the watcher automatically — when you say "listen on WhatsApp" or use `/whatsapp on`, it starts the watcher as a macOS launchd agent targeting the current iTerm2 session. The control script is at `scripts/watcher-ctl.sh`:
-
-```bash
-scripts/watcher-ctl.sh start    # Install and start as launchd agent
-scripts/watcher-ctl.sh stop     # Stop and unload the agent
-scripts/watcher-ctl.sh status   # Show whether the agent is running
+```
+"Message me on WhatsApp when you're done. I'll wait."
 ```
 
-The launchd agent is configured with `KeepAlive: true`, so macOS automatically restarts the watcher if it crashes. It also uses `ProcessType: Interactive` and `LimitLoadToSessionType: Aqua`, which gives the agent access to the macOS GUI session. This is required because AppleScript needs a GUI context to control iTerm2 — without it, `osascript` calls from a launchd background agent would fail silently or be refused by the system.
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WHAZAA_LOG` | `/tmp/whazaa-incoming.log` | Path to the incoming message log file |
-| `WHAZAA_POLL_INTERVAL` | `2` | Seconds between file checks |
-
 ---
 
-## Uninstall
+## CLI commands
 
 ```bash
+# First-time setup: configure MCP and pair with WhatsApp
+npx -y whazaa setup
+
+# Start the watcher daemon (manages iTerm2 delivery and IPC)
+npx whazaa watch [session-id]
+
+# Remove MCP config and stored credentials
 npx -y whazaa uninstall
 ```
 
-This removes Whazaa from `~/.claude/.mcp.json` and deletes stored credentials from `~/.whazaa/`. Restart Claude Code to apply.
+---
+
+## Watcher daemon
+
+The watcher is the core of Whazaa. It runs as a macOS launchd agent so it starts automatically and restarts if it crashes.
+
+### Starting manually
+
+```bash
+npx whazaa watch
+```
+
+Pass an iTerm2 session ID to target a specific terminal:
+
+```bash
+npx whazaa watch $ITERM_SESSION_ID
+```
+
+### launchd setup (auto-start)
+
+Claude Code can manage the watcher automatically. Use the control script:
+
+```bash
+scripts/watcher-ctl.sh start    # Install and start as launchd agent
+scripts/watcher-ctl.sh stop     # Stop and unload
+scripts/watcher-ctl.sh status   # Show running state
+```
+
+The agent uses `KeepAlive: true` and `ProcessType: Interactive`. The Interactive process type and `LimitLoadToSessionType: Aqua` are required so the watcher can access the macOS GUI session and call AppleScript to control iTerm2.
+
+### Session resolution
+
+When a message arrives, the watcher delivers it to Claude using this fallback chain:
+
+1. Try the cached session ID — but only if Claude is actually running there (not at a shell prompt)
+2. Search all iTerm2 sessions for one whose tab name contains "claude"
+3. Create a new iTerm2 tab, `cd $HOME`, run `claude`, wait for it to boot
+
+The watcher recovers automatically if you close and reopen your Claude tab.
+
+> **Platform requirement:** The watcher requires macOS with [iTerm2](https://iterm2.com/). It uses AppleScript (`osascript`) to type into terminal sessions. Terminal.app and non-macOS platforms are not yet supported.
 
 ---
 
-## Manual Configuration
+## WhatsApp commands
 
-If you prefer to configure manually, add Whazaa to `~/.claude/.mcp.json` (or your project's `.mcp.json`):
+Certain messages sent from your phone are intercepted by the watcher and handled as commands rather than forwarded to Claude.
 
-### Using npx (always latest version)
+| Command | Description |
+|---------|-------------|
+| `/relocate <path>` or `/r <path>` | Open a new iTerm2 tab in the given directory and start Claude there |
+| `/sessions` or `/s` | List open Claude sessions and offer to switch between them |
+
+### /relocate
+
+```
+/relocate ~/projects/myapp
+/r ~/projects/myapp
+```
+
+If a Claude session is already open in that directory, Whazaa focuses it instead of creating a new tab. Tilde expansion is supported.
+
+After relocating, subsequent messages are delivered to the new session.
+
+### /sessions
+
+Reply `/s` to get a numbered list of open Claude sessions with their working directories. Reply with a number to switch the active session. Reply `0` or `cancel` to abort.
+
+---
+
+## Multiple sessions
+
+Whazaa supports multiple simultaneous Claude Code windows. Each MCP server instance registers its `TERM_SESSION_ID` when it starts. Whichever session most recently called `whatsapp_send` becomes the active recipient for incoming messages.
+
+The watcher maintains a separate incoming message queue for each registered session. If no session has sent a message yet, the first registered session is used.
+
+---
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WHAZAA_AUTH_DIR` | `~/.whazaa/auth/` | Directory for WhatsApp session credentials |
+
+---
+
+## Manual MCP configuration
+
+If you prefer to configure manually, add to `~/.claude/.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "whazaa": {
       "command": "npx",
-      "args": ["whazaa"]
+      "args": ["-y", "whazaa"]
     }
   }
 }
 ```
 
-### Using bunx
+Using bunx:
 
 ```json
 {
@@ -149,7 +207,7 @@ If you prefer to configure manually, add Whazaa to `~/.claude/.mcp.json` (or you
 }
 ```
 
-### Using a local build
+Using a local build:
 
 ```json
 {
@@ -162,103 +220,59 @@ If you prefer to configure manually, add Whazaa to `~/.claude/.mcp.json` (or you
 }
 ```
 
-After updating the MCP config, restart Claude Code. On first run, Whazaa prints a QR code to the Claude Code logs (check Settings → Developer → MCP Logs, or run it manually from a terminal first to complete pairing).
-
----
-
-## MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `whatsapp_status` | Report connection state and phone number |
-| `whatsapp_send` | Send a message to your own WhatsApp self-chat |
-| `whatsapp_receive` | Drain queued incoming messages from your phone |
-| `whatsapp_wait` | Block until a message arrives (up to timeout) |
-| `whatsapp_login` | Trigger a new QR pairing flow |
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `whazaa setup` | Interactive setup — configures MCP, pairs with WhatsApp |
-| `whazaa watch <session-id>` | Start terminal watcher for iTerm2 session |
-| `whazaa uninstall` | Remove MCP config and stored credentials |
-
----
-
-## How It Works
-
-Whazaa uses the [Baileys](https://github.com/WhiskeySockets/Baileys) library to maintain a persistent WebSocket connection to WhatsApp's servers using the same multi-device protocol as WhatsApp Web. It exposes MCP tools over stdin/stdout and routes all Baileys output to stderr to keep the JSON-RPC stream clean.
-
-**Stale instance cleanup:**
-When a new MCP server starts, it automatically finds and kills any existing Whazaa MCP processes (excluding watch processes and itself). This prevents multiple instances from competing for the same WhatsApp auth credentials, which would otherwise cause frequent disconnects as each instance races to own the session.
-
-**Message flow (incoming):**
-1. You type a message on your phone in the self-chat
-2. Baileys receives it via WebSocket
-3. Whazaa queues it in memory and writes it to the log file
-4. The `watch` process detects the new line and types it into your terminal
-5. Claude Code processes it as user input
-
-**Message flow (outgoing):**
-1. Claude calls `whatsapp_send` via MCP
-2. Whazaa converts Markdown to WhatsApp formatting
-3. Baileys sends it via WebSocket
-4. The message appears on your phone
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WHAZAA_AUTH_DIR` | `~/.whazaa/auth/` | Directory for WhatsApp session credentials |
-| `WHAZAA_LOG` | `/tmp/whazaa-incoming.log` | Incoming message log file (used by `watch`) |
-| `WHAZAA_POLL_INTERVAL` | `2` | Watcher poll interval in seconds |
-
 ---
 
 ## Troubleshooting
 
 **"Logged out (401)" error**
 
-Your session was invalidated (e.g. you unlinked the device in WhatsApp). Run `npx -y whazaa setup` again to re-pair.
+Your session was invalidated. Run `npx -y whazaa setup` to re-pair.
 
-**Messages not received**
+**Tools return "Watcher not running"**
 
-Call `whatsapp_receive` to drain the queue. Only messages sent to your own number (the self-chat / "Saved Messages" chat) are captured. If using the watcher, check that it's running: `ps aux | grep "whazaa.*watch"`.
+The watcher daemon is not running. Start it with `npx whazaa watch` or use `scripts/watcher-ctl.sh start` to install it as a launchd agent.
+
+**Messages not appearing in Claude**
+
+Check that the watcher is running: `ps aux | grep "whazaa.*watch"`. Verify the session ID matches your Claude tab: `echo $ITERM_SESSION_ID`.
 
 **"iTerm2 wants to control..." security prompt**
 
-On first use, macOS will show a security dialog asking whether to allow the watcher (or `osascript`) to control iTerm2. Click "OK" to allow it. If you accidentally clicked "Don't Allow", go to System Settings → Privacy & Security → Automation and enable iTerm2 for the relevant app. Without this permission, the watcher cannot type messages into your terminal.
+Click OK. If you clicked "Don't Allow", go to System Settings > Privacy & Security > Automation and enable iTerm2 for the relevant app.
 
-**Watcher not typing into terminal**
+**MCP server disconnects frequently**
 
-Verify the session ID matches your Claude Code tab: `echo $ITERM_SESSION_ID`. The watcher requires iTerm2 on macOS.
+This happens when multiple Whazaa MCP processes compete for the same WhatsApp session. Whazaa automatically kills stale instances on startup. If the problem persists, run `pkill -f "whazaa"` and let Claude Code restart the MCP server.
 
 **Connection keeps dropping**
 
-Whazaa uses exponential backoff to reconnect automatically. Check your network connection. If the problem persists, use `whatsapp_login` to re-establish the session.
+Whazaa reconnects automatically with exponential backoff (1s to 60s). Check your network. If the issue persists, call `whatsapp_login` to re-establish the session.
 
-**Multiple WhatsApp accounts**
+---
 
-Set `WHAZAA_AUTH_DIR` to a different directory for each account and run separate instances.
+## Security
+
+- Session credentials are stored locally in `~/.whazaa/auth/`. Treat them like passwords — they grant full access to your WhatsApp Web session.
+- Whazaa only reads and sends messages in your self-chat. It cannot access other conversations.
+- No data is sent to any third-party service. All communication is directly with WhatsApp's servers via Baileys.
 
 ---
 
 ## Requirements
 
 - Node.js >= 18
-- WhatsApp account with multi-device support
-- **For the `watch` command:** macOS with [iTerm2](https://iterm2.com/) (uses AppleScript to type into terminal sessions)
+- WhatsApp account (any — multi-device support is standard)
+- macOS with [iTerm2](https://iterm2.com/) for the `watch` command and iTerm2 delivery
 
 ---
 
-## Security Notes
+## Uninstall
 
-- Session credentials are stored locally in `~/.whazaa/auth/`. Treat them like passwords.
-- Whazaa only reads and sends messages in your self-chat. It does not have access to other conversations.
-- No data is sent to any third-party service. The connection is directly to WhatsApp's servers via Baileys.
+```bash
+npx -y whazaa uninstall
+```
+
+Removes Whazaa from `~/.claude/.mcp.json` and deletes credentials from `~/.whazaa/`. Restart Claude Code to apply.
 
 ---
 

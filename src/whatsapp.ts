@@ -1,5 +1,12 @@
 /**
- * whatsapp.ts — WhatsApp connection manager
+ * whatsapp.ts — WhatsApp connection manager (setup mode only)
+ *
+ * This module is used exclusively by the setup wizard (`npx whazaa setup`)
+ * to verify existing credentials and perform first-time QR pairing.
+ *
+ * In normal operation, the watcher daemon (watch.ts) is the sole owner of
+ * the Baileys connection. The MCP server (index.ts) communicates with the
+ * watcher via IPC (ipc-client.ts) and does NOT call this module.
  *
  * Manages the Baileys WebSocket connection with:
  *   - Automatic self-JID detection (no hardcoded phone number)
@@ -9,10 +16,6 @@
  *   - Markdown -> WhatsApp format conversion
  *   - All Baileys output silenced to avoid MCP stdio pollution
  */
-
-import { appendFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import makeWASocket, {
   DisconnectReason,
@@ -24,11 +27,6 @@ import pino from "pino";
 import { resolveAuthDir, printQR } from "./auth.js";
 
 // --- Types -------------------------------------------------------------------
-
-export interface QueuedMessage {
-  body: string;
-  timestamp: number;
-}
 
 export interface WhatsAppStatus {
   connected: boolean;
@@ -47,13 +45,7 @@ export interface WhatsAppStatus {
 /** The active Baileys socket (null when disconnected) */
 let sock: ReturnType<typeof makeWASocket> | null = null;
 
-/** Incoming messages from the phone waiting to be drained */
-const messageQueue: QueuedMessage[] = [];
-
-/** IDs of messages sent by this process — used to suppress self-echo */
-const sentMessageIds = new Set<string>();
-
-/** Current connection state exposed to MCP tools */
+/** Current connection state */
 let status: WhatsAppStatus = {
   connected: false,
   phoneNumber: null,
@@ -91,26 +83,12 @@ let qrResolve: (() => void) | null = null;
 const logger = pino({ level: "silent" });
 
 /**
- * Convert common Markdown syntax to WhatsApp formatting codes.
- *
- *   **bold**   -> *bold*   (WhatsApp bold)
- *   *italic*   -> _italic_ (WhatsApp italic)
- *   `code`     -> ```code``` (WhatsApp monospace)
- */
-function markdownToWhatsApp(text: string): string {
-  return text
-    .replace(/\*\*(.+?)\*\*/gs, "*$1*")
-    .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/gs, "_$1_")
-    .replace(/`([^`]+)`/g, "```$1```");
-}
-
-/**
  * Schedule a reconnection attempt with exponential backoff.
  * Does nothing if permanently logged out or a timer is already pending.
  */
 function scheduleReconnect(): void {
   if (permanentlyLoggedOut) return;
-  if (reconnectTimer) return; // already scheduled
+  if (reconnectTimer) return;
 
   reconnectAttempts++;
   const delay = Math.min(
@@ -149,31 +127,25 @@ async function connect(): Promise<void> {
       keys: makeCacheableSignalKeyStore(authState.keys, logger),
     },
     version,
-    // Browser string shown in WhatsApp's linked devices list
     browser: ["Whazaa", "cli", "0.1.0"],
-    printQRInTerminal: false, // We handle QR display ourselves on stderr
+    printQRInTerminal: false,
     syncFullHistory: false,
     markOnlineOnConnect: false,
     logger,
   });
 
-  // Persist credentials whenever they are updated
   sock.ev.on("creds.update", saveCreds);
 
-  // Handle connection lifecycle
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
-    // Display QR code when pairing is needed
     if (qr) {
       status.awaitingQR = true;
       printQR(qr);
 
-      // Resolve init promise so MCP server starts up even while awaiting scan
       if (initResolve) {
         initResolve();
         initResolve = null;
       }
 
-      // Notify setup mode that a QR was emitted (signals stale/invalid creds)
       if (qrResolve) {
         qrResolve();
         qrResolve = null;
@@ -185,15 +157,12 @@ async function connect(): Promise<void> {
       status.connected = true;
       reconnectAttempts = 0;
 
-      // Derive phone number and LID from the authenticated user
       const jid = sock?.user?.id ?? null;
       if (jid) {
-        // JID format: "1234567890:12@s.whatsapp.net" or "1234567890@s.whatsapp.net"
         const number = jid.split(":")[0].split("@")[0];
         status.phoneNumber = number;
         status.selfJid = `${number}@s.whatsapp.net`;
       }
-      // Capture LID (Linked Identity) — self-chat uses this format
       const lid = (sock?.user as unknown as Record<string, unknown>)?.lid as string | undefined;
       if (lid) {
         status.selfLid = lid;
@@ -203,13 +172,11 @@ async function connect(): Promise<void> {
         `[whazaa] Connected. Phone: +${status.phoneNumber ?? "unknown"}\n`
       );
 
-      // Resolve init promise on successful connection
       if (initResolve) {
         initResolve();
         initResolve = null;
       }
 
-      // Resolve the "fully connected" promise used by setup mode
       if (connectedResolve) {
         connectedResolve(status.phoneNumber ?? "unknown");
         connectedResolve = null;
@@ -224,7 +191,6 @@ async function connect(): Promise<void> {
           ?.statusCode;
 
       if (statusCode === DisconnectReason.loggedOut) {
-        // Auth is invalid (401). Stop reconnecting — user must re-pair.
         permanentlyLoggedOut = true;
         process.stderr.write(
           "[whazaa] Logged out (401). Run whatsapp_login to re-pair.\n"
@@ -247,67 +213,24 @@ async function connect(): Promise<void> {
     }
   });
 
-  // Handle incoming messages — only self-chat messages are queued
-  sock.ev.on("messages.upsert", ({ type, messages }) => {
-    // Accept both "notify" (real-time) and "append" (history sync / self-sent)
-    // Only skip "set" which is bulk history sync on first connect
-
-    for (const msg of messages) {
-      const remoteJid = msg.key?.remoteJid;
-      const body =
-        msg.message?.conversation ??
-        msg.message?.extendedTextMessage?.text ??
-        null;
-
-      // Filter to self-chat only: match selfJid, selfLid, or phone number prefix
-      // Strip device suffix (e.g. ":6" or ":12") for comparison
-      const stripDevice = (jid: string) => jid.replace(/:\d+@/, "@");
-      const selfNumber = status.phoneNumber;
-      const selfLid = status.selfLid ? stripDevice(status.selfLid) : null;
-      const remoteJidNorm = remoteJid ? stripDevice(remoteJid) : null;
-      const isSelfChat =
-        (status.selfJid && remoteJidNorm === stripDevice(status.selfJid)) ||
-        (selfLid && remoteJidNorm === selfLid) ||
-        (selfNumber && remoteJid?.startsWith(selfNumber));
-
-      if (!isSelfChat) {
-        continue;
-      }
-
-      // Deduplicate: skip messages sent by this process
-      const msgId = msg.key?.id;
-      if (msgId && sentMessageIds.has(msgId)) {
-        sentMessageIds.delete(msgId);
-        continue;
-      }
-
-      if (body) {
-        const ts = Number(msg.messageTimestamp) * 1_000;
-        messageQueue.push({ body, timestamp: ts });
-        notifyMessageWaiters();
-
-        // Write to signal file so background watchers can detect new messages
-        const signalFile = "/tmp/whazaa-incoming.log";
-        const line = `[${new Date(ts).toISOString()}] ${body}\n`;
-        try { appendFileSync(signalFile, line); } catch { /* ignore */ }
-      }
-    }
-  });
+  // Note: no messages.upsert handler here — message routing is handled by
+  // the watcher daemon (watch.ts) which is the sole WhatsApp connection owner
+  // in normal operation. This module is used only by the setup wizard.
 }
 
 // --- Public API --------------------------------------------------------------
 
 /**
  * Initialize the WhatsApp connection.
- * Resolves once the connection is open OR a QR code has been emitted
- * (so the MCP server can start handling tool calls immediately).
+ * Resolves once the connection is open OR a QR code has been emitted.
+ * Used by the setup wizard only.
  */
 export async function initialize(): Promise<void> {
   await new Promise<void>((resolve) => {
     initResolve = resolve;
     connect().catch((err) => {
       process.stderr.write(`[whazaa] Init error: ${err}\n`);
-      resolve(); // Don't block MCP startup on connection failure
+      resolve();
     });
   });
 }
@@ -315,7 +238,6 @@ export async function initialize(): Promise<void> {
 /**
  * Wait until the WhatsApp connection is fully open.
  * Used by setup mode to block until the user has scanned the QR code.
- * If already connected, resolves immediately.
  */
 export function waitForConnection(): Promise<string> {
   if (status.connected && status.phoneNumber) {
@@ -341,8 +263,7 @@ export function waitForLogout(): Promise<void> {
 
 /**
  * Returns a promise that resolves when Baileys emits a QR code.
- * Used by setup mode to detect that existing credentials are stale
- * (a QR appearing during reconnect means the saved session is invalid).
+ * Used by setup mode to detect that existing credentials are stale.
  */
 export function waitForQR(): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -352,8 +273,7 @@ export function waitForQR(): Promise<void> {
 
 /**
  * Trigger a new QR pairing flow.
- * Closes the current socket (if any) and reconnects with fresh state
- * so Baileys emits a new QR code.
+ * Closes the current socket (if any) and reconnects with fresh state.
  */
 export async function triggerLogin(): Promise<void> {
   permanentlyLoggedOut = false;
@@ -381,7 +301,6 @@ export async function triggerLogin(): Promise<void> {
     awaitingQR: false,
   };
 
-  // Reconnect — Baileys will emit a QR if no creds are present
   await connect();
 }
 
@@ -390,122 +309,4 @@ export async function triggerLogin(): Promise<void> {
  */
 export function getStatus(): WhatsAppStatus {
   return { ...status };
-}
-
-/**
- * Send a message to the authenticated user's own WhatsApp number.
- * Converts Markdown to WhatsApp formatting before sending.
- *
- * @throws If not connected or socket is unavailable.
- */
-export async function sendMessage(message: string): Promise<void> {
-  if (!sock) {
-    throw new Error(
-      "WhatsApp socket not initialized. Is the connection open?"
-    );
-  }
-  if (!status.connected) {
-    throw new Error(
-      "WhatsApp is not connected. Check status with whatsapp_status."
-    );
-  }
-  if (!status.selfJid) {
-    throw new Error(
-      "Self JID not yet known. Wait for connection to fully open."
-    );
-  }
-
-  const text = markdownToWhatsApp(message);
-  const result = await sock.sendMessage(status.selfJid, { text });
-
-  // Register the sent message ID for deduplication
-  if (result?.key?.id) {
-    const id = result.key.id;
-    sentMessageIds.add(id);
-    // Auto-expire after 30 seconds to prevent unbounded growth
-    setTimeout(() => {
-      sentMessageIds.delete(id);
-    }, 30_000);
-  }
-}
-
-/**
- * Drain and return all queued incoming messages, then clear the queue.
- */
-export function drainMessages(): QueuedMessage[] {
-  const snapshot = [...messageQueue];
-  messageQueue.length = 0;
-  return snapshot;
-}
-
-/** Resolve callbacks waiting for the next message */
-let messageWaiters: Array<(msgs: QueuedMessage[]) => void> = [];
-
-/** Notify any waiters that messages have arrived */
-function notifyMessageWaiters(): void {
-  if (messageWaiters.length > 0 && messageQueue.length > 0) {
-    const snapshot = drainMessages();
-    const waiters = messageWaiters.splice(0);
-    for (const resolve of waiters) {
-      resolve(snapshot);
-    }
-  }
-}
-
-/**
- * Wait for the next incoming message(s), up to timeoutMs.
- * Returns immediately if messages are already queued.
- * Returns empty array on timeout.
- */
-export function waitForMessages(timeoutMs: number): Promise<QueuedMessage[]> {
-  // Return immediately if messages are already queued
-  if (messageQueue.length > 0) {
-    return Promise.resolve(drainMessages());
-  }
-
-  return new Promise<QueuedMessage[]>((resolve) => {
-    const timer = setTimeout(() => {
-      // Remove this waiter on timeout
-      messageWaiters = messageWaiters.filter((w) => w !== resolve);
-      resolve([]);
-    }, timeoutMs);
-
-    messageWaiters.push((msgs) => {
-      clearTimeout(timer);
-      resolve(msgs);
-    });
-  });
-}
-
-// --- Graceful shutdown -------------------------------------------------------
-
-function shutdown(signal: string): void {
-  process.stderr.write(`[whazaa] Received ${signal}. Shutting down...\n`);
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  if (sock) {
-    try {
-      sock.end(undefined);
-    } catch {
-      // Ignore
-    }
-    sock = null;
-  }
-
-  process.exit(0);
-}
-
-/**
- * Register SIGINT/SIGTERM handlers for graceful shutdown.
- * Call this only from the MCP server path — NOT from the watcher process.
- * (The watcher registers its own handlers and importing whatsapp.ts should
- * not add handlers as a module-level side effect.)
- */
-export function registerShutdownHandlers(): void {
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
