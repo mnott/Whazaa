@@ -493,6 +493,131 @@ function trackBody(body: string): void {
   setTimeout(() => recentBodies.delete(body), 30_000);
 }
 
+// --- Command handlers --------------------------------------------------------
+
+/**
+ * Find an iTerm2 session that is running Claude in the given directory.
+ *
+ * Iterates all sessions, checks if their name contains "claude" (indicating
+ * Claude Code is running), and compares the session's working directory (via
+ * the `variable named "session.path"` AppleScript property) to the target.
+ *
+ * Returns the session ID if found, null otherwise.
+ */
+function findClaudeInDirectory(targetDir: string): string | null {
+  const script = `
+tell application "iTerm2"
+  set output to ""
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        set sessionId to id of aSession
+        set sessionName to name of aSession
+        set sessionPath to (variable named "session.path" of aSession)
+        set output to output & sessionId & (ASCII character 9) & sessionName & (ASCII character 9) & sessionPath & linefeed
+      end repeat
+    end repeat
+  end repeat
+  return output
+end tell`;
+
+  const result = runAppleScript(script);
+  if (!result) return null;
+
+  const lines = result.split("\n").filter(Boolean);
+  for (const line of lines) {
+    const parts = line.split("\t");
+    if (parts.length < 3) continue;
+
+    const id = parts[0];
+    const name = parts[1].toLowerCase();
+    const sessionPath = parts[2];
+
+    if (name.includes("claude") && sessionPath === targetDir) {
+      process.stderr.write(
+        `[whazaa-watch] Found existing Claude session in ${targetDir}: ${id}\n`
+      );
+      return id;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Handle a /relocate <path> command received via WhatsApp.
+ *
+ * First checks if Claude is already running in the target directory.
+ * If so, focuses that tab instead of opening a duplicate.
+ * Otherwise, opens a new iTerm2 tab, cds to the given path, and starts `claude`.
+ */
+function handleRelocate(targetPath: string): void {
+  process.stderr.write(`[whazaa-watch] /relocate -> ${targetPath}\n`);
+
+  // Expand ~ manually so the AppleScript shell command resolves it correctly
+  const expandedPath = targetPath.startsWith("~/")
+    ? homedir() + targetPath.slice(1)
+    : targetPath;
+
+  // Check if Claude is already running in this directory
+  const existingSession = findClaudeInDirectory(expandedPath);
+  if (existingSession) {
+    // Focus the existing session instead of opening a new tab
+    const focusScript = `
+tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${existingSession}" then
+          set current tab of aWindow to aTab
+          set frontmost of aWindow to true
+          activate
+          return "focused"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not_found"
+end tell`;
+
+    const focusResult = runAppleScript(focusScript);
+    if (focusResult === "focused") {
+      process.stderr.write(`[whazaa-watch] /relocate: focused existing session ${existingSession} in ${targetPath}\n`);
+    } else {
+      process.stderr.write(`[whazaa-watch] /relocate: session ${existingSession} vanished, opening new tab\n`);
+    }
+    if (focusResult === "focused") return;
+  }
+
+  // No existing session — open a new tab
+  // Escape double-quotes and backslashes for embedding inside AppleScript string literals
+  const escapedPath = expandedPath.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+  const script = `
+tell application "iTerm2"
+  if (count of windows) = 0 then
+    set newWindow to (create window with default profile)
+    tell current session of current tab of newWindow
+      write text "cd \\"${escapedPath}\\" && claude"
+    end tell
+  else
+    tell current window
+      set newTab to (create tab with default profile)
+      tell current session of newTab
+        write text "cd \\"${escapedPath}\\" && claude"
+      end tell
+    end tell
+  end if
+end tell`;
+
+  const result = runAppleScript(script);
+  if (result === null) {
+    process.stderr.write("[whazaa-watch] /relocate: failed to open new iTerm2 tab\n");
+  } else {
+    process.stderr.write(`[whazaa-watch] /relocate: opened new tab in ${targetPath}\n`);
+  }
+}
+
 // --- Main loop ---------------------------------------------------------------
 
 export async function watch(rawSessionId?: string): Promise<void> {
@@ -539,6 +664,26 @@ export async function watch(rawSessionId?: string): Promise<void> {
   };
   process.on("SIGINT", () => cleanup("SIGINT"));
   process.on("SIGTERM", () => cleanup("SIGTERM"));
+
+  /**
+   * Top-level message handler.
+   *
+   * Intercepts special watcher commands (e.g. /relocate) before they reach
+   * Claude. Everything else is forwarded to deliverMessage() as usual.
+   */
+  function handleMessage(text: string): void {
+    if (text.startsWith("/relocate ")) {
+      const targetPath = text.slice("/relocate ".length).trim();
+      if (targetPath) {
+        handleRelocate(targetPath);
+        return;
+      }
+      process.stderr.write("[whazaa-watch] /relocate: no path provided\n");
+      return;
+    }
+
+    deliverMessage(text);
+  }
 
   /**
    * Smart delivery: type message into the active Claude session.
@@ -618,7 +763,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
     cleanupWatcher = await connectWatcher((body: string, _msgId: string) => {
       trackBody(body);
       console.log(`[whazaa-watch] (direct) -> ${body}`);
-      deliverMessage(body);
+      handleMessage(body);
     });
   } else {
     console.log(`Waiting for messages (via MCP server log)...\n`);
@@ -647,7 +792,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
       cleanupWatcher = await connectWatcher((body: string, _msgId: string) => {
         trackBody(body);
         console.log(`[whazaa-watch] (direct) -> ${body}`);
-        deliverMessage(body);
+        handleMessage(body);
       });
     }
   }, 30_000);
@@ -686,7 +831,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
 
       const source = directMode ? "fallback" : "log";
       console.log(`[whazaa-watch] (${source}) -> ${msg}`);
-      deliverMessage(msg);
+      handleMessage(msg);
     }
 
     seen = lines.length;
