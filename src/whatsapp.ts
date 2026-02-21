@@ -28,10 +28,12 @@ export interface QueuedMessage {
 
 export interface WhatsAppStatus {
   connected: boolean;
-  /** E.164 phone number without leading +, e.g. "41764502698" */
+  /** E.164 phone number without leading +, e.g. "1234567890" */
   phoneNumber: string | null;
-  /** Full WhatsApp JID, e.g. "41764502698@s.whatsapp.net" */
+  /** Full WhatsApp JID, e.g. "1234567890@s.whatsapp.net" */
   selfJid: string | null;
+  /** Linked Identity JID, e.g. "123456789012@lid" — used for self-chat */
+  selfLid: string | null;
   /** Whether a QR scan is currently required */
   awaitingQR: boolean;
 }
@@ -52,6 +54,7 @@ let status: WhatsAppStatus = {
   connected: false,
   phoneNumber: null,
   selfJid: null,
+  selfLid: null,
   awaitingQR: false,
 };
 
@@ -65,6 +68,9 @@ let permanentlyLoggedOut = false;
 
 /** Resolve when the first connection attempt completes (either open or qr shown) */
 let initResolve: (() => void) | null = null;
+
+/** Resolve when the connection is fully open (used by setup mode) */
+let connectedResolve: ((phoneNumber: string) => void) | null = null;
 
 // --- Internal helpers --------------------------------------------------------
 
@@ -163,13 +169,18 @@ async function connect(): Promise<void> {
       status.connected = true;
       reconnectAttempts = 0;
 
-      // Derive phone number from the authenticated user's JID
+      // Derive phone number and LID from the authenticated user
       const jid = sock?.user?.id ?? null;
       if (jid) {
-        // JID format: "41764502698:12@s.whatsapp.net" or "41764502698@s.whatsapp.net"
+        // JID format: "1234567890:12@s.whatsapp.net" or "1234567890@s.whatsapp.net"
         const number = jid.split(":")[0].split("@")[0];
         status.phoneNumber = number;
         status.selfJid = `${number}@s.whatsapp.net`;
+      }
+      // Capture LID (Linked Identity) — self-chat uses this format
+      const lid = (sock?.user as unknown as Record<string, unknown>)?.lid as string | undefined;
+      if (lid) {
+        status.selfLid = lid;
       }
 
       process.stderr.write(
@@ -180,6 +191,12 @@ async function connect(): Promise<void> {
       if (initResolve) {
         initResolve();
         initResolve = null;
+      }
+
+      // Resolve the "fully connected" promise used by setup mode
+      if (connectedResolve) {
+        connectedResolve(status.phoneNumber ?? "unknown");
+        connectedResolve = null;
       }
     }
 
@@ -211,13 +228,30 @@ async function connect(): Promise<void> {
 
   // Handle incoming messages — only self-chat messages are queued
   sock.ev.on("messages.upsert", ({ type, messages }) => {
-    if (type !== "notify") return;
+    // Accept both "notify" (real-time) and "append" (history sync / self-sent)
+    // Only skip "set" which is bulk history sync on first connect
 
     for (const msg of messages) {
       const remoteJid = msg.key?.remoteJid;
+      const body =
+        msg.message?.conversation ??
+        msg.message?.extendedTextMessage?.text ??
+        null;
 
-      // Filter to self-chat only
-      if (!status.selfJid || remoteJid !== status.selfJid) continue;
+      // Filter to self-chat only: match selfJid, selfLid, or phone number prefix
+      // Strip device suffix (e.g. ":6" or ":12") for comparison
+      const stripDevice = (jid: string) => jid.replace(/:\d+@/, "@");
+      const selfNumber = status.phoneNumber;
+      const selfLid = status.selfLid ? stripDevice(status.selfLid) : null;
+      const remoteJidNorm = remoteJid ? stripDevice(remoteJid) : null;
+      const isSelfChat =
+        (status.selfJid && remoteJidNorm === stripDevice(status.selfJid)) ||
+        (selfLid && remoteJidNorm === selfLid) ||
+        (selfNumber && remoteJid?.startsWith(selfNumber));
+
+      if (!isSelfChat) {
+        continue;
+      }
 
       // Deduplicate: skip messages sent by this process
       const msgId = msg.key?.id;
@@ -225,12 +259,6 @@ async function connect(): Promise<void> {
         sentMessageIds.delete(msgId);
         continue;
       }
-
-      // Extract text body (conversation or extended text message)
-      const body =
-        msg.message?.conversation ??
-        msg.message?.extendedTextMessage?.text ??
-        null;
 
       if (body) {
         messageQueue.push({
@@ -256,6 +284,20 @@ export async function initialize(): Promise<void> {
       process.stderr.write(`[whazaa] Init error: ${err}\n`);
       resolve(); // Don't block MCP startup on connection failure
     });
+  });
+}
+
+/**
+ * Wait until the WhatsApp connection is fully open.
+ * Used by setup mode to block until the user has scanned the QR code.
+ * If already connected, resolves immediately.
+ */
+export function waitForConnection(): Promise<string> {
+  if (status.connected && status.phoneNumber) {
+    return Promise.resolve(status.phoneNumber);
+  }
+  return new Promise<string>((resolve) => {
+    connectedResolve = resolve;
   });
 }
 
@@ -286,6 +328,7 @@ export async function triggerLogin(): Promise<void> {
     connected: false,
     phoneNumber: null,
     selfJid: null,
+    selfLid: null,
     awaitingQR: false,
   };
 
