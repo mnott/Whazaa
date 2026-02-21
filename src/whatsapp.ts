@@ -273,6 +273,7 @@ async function connect(): Promise<void> {
           body,
           timestamp: Number(msg.messageTimestamp) * 1_000,
         });
+        notifyMessageWaiters();
       }
     }
   });
@@ -408,6 +409,45 @@ export function drainMessages(): QueuedMessage[] {
   const snapshot = [...messageQueue];
   messageQueue.length = 0;
   return snapshot;
+}
+
+/** Resolve callbacks waiting for the next message */
+let messageWaiters: Array<(msgs: QueuedMessage[]) => void> = [];
+
+/** Notify any waiters that messages have arrived */
+function notifyMessageWaiters(): void {
+  if (messageWaiters.length > 0 && messageQueue.length > 0) {
+    const snapshot = drainMessages();
+    const waiters = messageWaiters.splice(0);
+    for (const resolve of waiters) {
+      resolve(snapshot);
+    }
+  }
+}
+
+/**
+ * Wait for the next incoming message(s), up to timeoutMs.
+ * Returns immediately if messages are already queued.
+ * Returns empty array on timeout.
+ */
+export function waitForMessages(timeoutMs: number): Promise<QueuedMessage[]> {
+  // Return immediately if messages are already queued
+  if (messageQueue.length > 0) {
+    return Promise.resolve(drainMessages());
+  }
+
+  return new Promise<QueuedMessage[]>((resolve) => {
+    const timer = setTimeout(() => {
+      // Remove this waiter on timeout
+      messageWaiters = messageWaiters.filter((w) => w !== resolve);
+      resolve([]);
+    }, timeoutMs);
+
+    messageWaiters.push((msgs) => {
+      clearTimeout(timer);
+      resolve(msgs);
+    });
+  });
 }
 
 // --- Graceful shutdown -------------------------------------------------------

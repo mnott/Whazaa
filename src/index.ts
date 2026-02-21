@@ -29,6 +29,7 @@ import {
   getStatus,
   sendMessage,
   drainMessages,
+  waitForMessages,
   triggerLogin,
   waitForConnection,
   waitForLogout,
@@ -278,6 +279,44 @@ server.tool(
 
     if (messages.length === 0) {
       return { content: [{ type: "text", text: "No new messages." }] };
+    }
+
+    const formatted = messages
+      .map((m) => {
+        const ts = new Date(m.timestamp).toISOString();
+        return `[${ts}] ${m.body}`;
+      })
+      .join("\n");
+
+    return { content: [{ type: "text", text: formatted }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_wait
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_wait",
+  [
+    "Wait for the next incoming WhatsApp message.",
+    "Blocks until a message arrives or the timeout is reached (default 120 seconds).",
+    "Use this instead of polling whatsapp_receive in a loop.",
+    "Run this in the background so you can continue working while waiting.",
+  ].join(" "),
+  {
+    timeout: z
+      .number()
+      .min(1)
+      .max(300)
+      .default(120)
+      .describe("Max seconds to wait for a message (default 120)"),
+  },
+  async ({ timeout }) => {
+    const messages = await waitForMessages(timeout * 1_000);
+
+    if (messages.length === 0) {
+      return { content: [{ type: "text", text: "No messages received (timed out)." }] };
     }
 
     const formatted = messages
