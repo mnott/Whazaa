@@ -1,0 +1,40 @@
+# Source files — only dist/ is needed at runtime
+src/
+tsconfig.json
+
+# Development tooling
+.gitignore
+.npmignore
+bun.lock
+*.lock
+
+# Auth session data (sensitive credentials)
+.whazaa/
+auth/
+*.creds.json
+
+# Debug logs
+*.log
+/tmp/
+
+# Editor directories
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# TypeScript incremental compilation info
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Git
+.git/
+.gitignore

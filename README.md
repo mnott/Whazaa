@@ -46,7 +46,7 @@ whazaa
 ### Option 3: Build from source
 
 ```bash
-git clone https://github.com/mnott/whazaa.git
+git clone https://github.com/mnott/Whazaa.git
 cd whazaa
 npm install
 npm run build
