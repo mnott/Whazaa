@@ -105,6 +105,16 @@ export interface TtsResult {
   bytesSent: number;
 }
 
+export interface VoiceConfigResult {
+  success: boolean;
+  config?: {
+    defaultVoice: string;
+    voiceMode: boolean;
+    personas: Record<string, string>;
+  };
+  error?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -195,6 +205,12 @@ export class WatcherClient {
     if (params.jid !== undefined) ipcParams.jid = params.jid;
     const result = await this.call("tts", ipcParams);
     return result as unknown as TtsResult;
+  }
+
+  async voiceConfig(action: "get" | "set", updates?: Record<string, unknown>): Promise<VoiceConfigResult> {
+    const params: Record<string, unknown> = { action, ...updates };
+    const result = await this.call("voice_config", params);
+    return result as unknown as VoiceConfigResult;
   }
 
   // -------------------------------------------------------------------------

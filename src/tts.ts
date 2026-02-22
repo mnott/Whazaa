@@ -14,7 +14,7 @@
  * download on first call, then cached). Subsequent calls are fast.
  *
  * Environment variables:
- *   WHAZAA_TTS_VOICE  Default voice name (default: "af_heart")
+ *   WHAZAA_TTS_VOICE  Default voice name (default: "bm_fable")
  */
 
 import { execSync } from "node:child_process";
@@ -52,7 +52,7 @@ const KNOWN_VOICES: KokoroVoice[] = [
   "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
 ];
 
-const DEFAULT_VOICE: KokoroVoice = (process.env.WHAZAA_TTS_VOICE as KokoroVoice | undefined) ?? "af_heart";
+const DEFAULT_VOICE: KokoroVoice = (process.env.WHAZAA_TTS_VOICE as KokoroVoice | undefined) ?? "bm_fable";
 const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ async function ensureInitialized(): Promise<void> {
  * Convert text to a WhatsApp-compatible OGG Opus voice note buffer.
  *
  * @param text   The text to synthesize
- * @param voice  Kokoro voice name (default: WHAZAA_TTS_VOICE env or "af_heart")
+ * @param voice  Kokoro voice name (default: WHAZAA_TTS_VOICE env or "bm_fable")
  * @returns      OGG Opus audio buffer ready to pass to Baileys sendMessage
  */
 export async function textToVoiceNote(

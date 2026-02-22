@@ -40,7 +40,7 @@ import {
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 import { watch } from "./watch.js";
-import { WatcherClient, ChatsResult, HistoryResult, TtsResult } from "./ipc-client.js";
+import { WatcherClient, ChatsResult, HistoryResult, TtsResult, VoiceConfigResult } from "./ipc-client.js";
 import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
@@ -295,7 +295,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        "Optional: if set, send message as a TTS voice note using Kokoro. Use 'true' or 'default' for the default voice (af_heart), or a specific voice name like 'bm_george', 'af_bella', 'af_nova'."
+        "Optional: if set, send message as a TTS voice note using Kokoro. Use 'true' or 'default' for the default voice (bm_fable), or a specific voice name like 'bm_george', 'af_bella', 'af_nova'."
       ),
   },
   async ({ message, recipient, voice }) => {
@@ -355,9 +355,9 @@ server.tool(
     voice: z
       .string()
       .optional()
-      .default("af_heart")
+      .default("bm_fable")
       .describe(
-        "Kokoro voice to use (default: 'af_heart'). Examples: 'af_bella', 'af_nova', 'bm_george', 'bm_daniel', 'bf_emma'."
+        "Kokoro voice to use (default: 'bm_fable'). Examples: 'af_bella', 'af_nova', 'bm_george', 'bm_daniel', 'bf_emma'."
       ),
     recipient: z
       .string()
@@ -742,6 +742,72 @@ server.tool(
           {
             type: "text",
             text: `${messages.length} message(s) for ${jid} [source: Baileys]:\n${lines.join("\n")}`,
+          },
+        ],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_voice_config
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_voice_config",
+  [
+    "Get or set voice mode configuration.",
+    "Actions: 'get' (read current config), 'set' (update config).",
+    "Voice mode controls whether PAI responds via voice notes or text.",
+    "Default voice is 'bm_fable'.",
+    "Personas map names to voices (e.g. 'Nicole' -> 'af_nicole').",
+  ].join(" "),
+  {
+    action: z
+      .enum(["get", "set"])
+      .describe("Action: 'get' to read config, 'set' to update it"),
+    defaultVoice: z
+      .string()
+      .optional()
+      .describe("Set the default PAI voice (e.g. 'bm_fable', 'af_nicole')"),
+    voiceMode: z
+      .boolean()
+      .optional()
+      .describe("Enable/disable voice mode. When true, PAI should respond with voice notes."),
+    personas: z
+      .record(z.string())
+      .optional()
+      .describe("Map of persona names to voice IDs (e.g. {\"Nicole\": \"af_nicole\"})"),
+  },
+  async ({ action, defaultVoice, voiceMode, personas }) => {
+    try {
+      const updates: Record<string, unknown> = {};
+      if (defaultVoice !== undefined) updates.defaultVoice = defaultVoice;
+      if (voiceMode !== undefined) updates.voiceMode = voiceMode;
+      if (personas !== undefined) updates.personas = personas;
+
+      const result: VoiceConfigResult = await watcher.voiceConfig(action, Object.keys(updates).length > 0 ? updates : undefined);
+
+      if (!result.success) {
+        return { content: [{ type: "text", text: `Error: ${result.error}` }] };
+      }
+
+      const c = result.config!;
+      const personaList = Object.entries(c.personas)
+        .map(([name, voice]) => `  ${name} -> ${voice}`)
+        .join("\n");
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Voice config:\n  Mode: ${c.voiceMode ? "ON (voice notes)" : "OFF (text)"}\n  Default voice: ${c.defaultVoice}\n  Personas:\n${personaList}`,
           },
         ],
       };

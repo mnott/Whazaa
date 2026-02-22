@@ -175,6 +175,49 @@ const WHAZAA_DIR = join(homedir(), ".whazaa");
 const CHAT_CACHE_PATH = join(WHAZAA_DIR, "chat-cache.json");
 const CONTACT_CACHE_PATH = join(WHAZAA_DIR, "contact-cache.json");
 const MESSAGE_CACHE_PATH = join(WHAZAA_DIR, "message-cache.json");
+const VOICE_CONFIG_PATH = join(WHAZAA_DIR, "voice-config.json");
+
+// ---------------------------------------------------------------------------
+// Voice config persistence
+// ---------------------------------------------------------------------------
+
+interface VoiceConfig {
+  defaultVoice: string;
+  voiceMode: boolean;
+  personas: Record<string, string>;
+}
+
+const DEFAULT_VOICE_CONFIG: VoiceConfig = {
+  defaultVoice: "bm_fable",
+  voiceMode: false,
+  personas: {
+    "Nicole": "af_nicole",
+    "George": "bm_george",
+    "Daniel": "bm_daniel",
+    "Fable": "bm_fable",
+  },
+};
+
+function loadVoiceConfig(): VoiceConfig {
+  try {
+    if (existsSync(VOICE_CONFIG_PATH)) {
+      const raw = JSON.parse(readFileSync(VOICE_CONFIG_PATH, "utf-8")) as VoiceConfig;
+      return { ...DEFAULT_VOICE_CONFIG, ...raw, personas: { ...DEFAULT_VOICE_CONFIG.personas, ...raw.personas } };
+    }
+  } catch {
+    // Corrupted config — fall back to defaults
+  }
+  return { ...DEFAULT_VOICE_CONFIG, personas: { ...DEFAULT_VOICE_CONFIG.personas } };
+}
+
+function saveVoiceConfig(config: VoiceConfig): void {
+  try {
+    mkdirSync(WHAZAA_DIR, { recursive: true });
+    writeFileSync(VOICE_CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+  } catch (err) {
+    process.stderr.write(`[whazaa-watch] Failed to save voice config: ${err}\n`);
+  }
+}
 
 /**
  * Load chatStore and contactStore from disk if cache files exist.
@@ -953,13 +996,34 @@ async function handleRequest(
           ok: true,
           result: {
             targetJid,
-            voice: ttsVoice ?? process.env.WHAZAA_TTS_VOICE ?? "af_heart",
+            voice: ttsVoice ?? process.env.WHAZAA_TTS_VOICE ?? "bm_fable",
             bytesSent: audioBuffer.length,
           },
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         sendResponse(socket, { id, ok: false, error: msg });
+      }
+      socket.end();
+      break;
+    }
+
+    case "voice_config": {
+      const { action, ...updates } = params as { action?: string } & Record<string, unknown>;
+      if (action === "get") {
+        const config = loadVoiceConfig();
+        sendResponse(socket, { id, ok: true, result: { success: true, config: config as unknown as Record<string, unknown> } });
+      } else if (action === "set") {
+        const config = loadVoiceConfig();
+        if (updates.defaultVoice !== undefined) config.defaultVoice = String(updates.defaultVoice);
+        if (updates.voiceMode !== undefined) config.voiceMode = Boolean(updates.voiceMode);
+        if (updates.personas !== undefined && typeof updates.personas === "object" && updates.personas !== null) {
+          config.personas = { ...config.personas, ...(updates.personas as Record<string, string>) };
+        }
+        saveVoiceConfig(config);
+        sendResponse(socket, { id, ok: true, result: { success: true, config: config as unknown as Record<string, unknown> } });
+      } else {
+        sendResponse(socket, { id, ok: true, result: { success: false, error: "Unknown action. Use 'get' or 'set'." } });
       }
       socket.end();
       break;
