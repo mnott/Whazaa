@@ -340,6 +340,7 @@ Certain messages sent from your phone are intercepted by the watcher and handled
 |---------|-------------|
 | `/relocate <path>` or `/r <path>` | Open a new iTerm2 tab in the given directory and start Claude there |
 | `/sessions` or `/s` | List open Claude sessions with names; reply `/N` to switch, `/N name` to switch and rename |
+| _(image)_ | Send an image to your self-chat — the watcher downloads it and types the path into Claude |
 
 ### /relocate
 
@@ -357,6 +358,24 @@ After relocating, subsequent messages are delivered to the new session.
 Reply `/s` to get a numbered list of open Claude sessions with their working directories and names. The currently active session is marked with `*`.
 
 Switch to a session with `/1`, `/2`, etc. Switch and rename in one step with `/1 My Project`. Session names are stored as iTerm2 session variables and persist across watcher restarts.
+
+### Image forwarding
+
+Send an image to your WhatsApp self-chat and the watcher will download it to a temp file and type the path into your active Claude session:
+
+```
+/tmp/whazaa-img-a3f92b.jpg
+```
+
+If the image has a caption, it is appended on the same line:
+
+```
+/tmp/whazaa-img-a3f92b.jpg Describe this image
+```
+
+Claude Code can read image files natively, so it will process the image immediately without any extra steps.
+
+Supported formats: JPEG, PNG, WebP, GIF, and stickers.
 
 ---
 
