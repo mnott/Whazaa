@@ -67,6 +67,106 @@ The Kokoro TTS model (~160 MB) is downloaded automatically on first use of `what
 
 ---
 
+## How to Use
+
+Once Whazaa is set up, you talk to PAI (your AI assistant) in plain language. You never need to know about tool names or parameters — just say what you want.
+
+### Sending Messages
+
+Tell PAI what to say and to whom:
+
+- "Send Randolf a message saying I'll be late"
+- "Tell Nicole the meeting is moved to 3pm"
+- "Message my self-chat: pick up milk"
+
+If you don't say who to send it to, PAI sends to your own WhatsApp — useful for notes to yourself.
+
+### Voice Notes
+
+PAI can send a WhatsApp voice note instead of a text message:
+
+- "Send me a voice note saying good morning"
+- "Send a voice note to Nicole saying I'm on my way"
+- "Tell George via voice note that dinner is at 7"
+
+You can choose whose voice to use:
+
+- "Say it as George" or "Use George's voice"
+- "Send that as a voice note in Daniel's voice"
+- "Use Nicole's voice for this"
+
+See the full voice list at the bottom of this section.
+
+### Listening Locally (Mac Speakers)
+
+PAI can speak out loud through your Mac — no WhatsApp needed:
+
+- "Say that out loud"
+- "Read that to me"
+- "Talk to me" or "Say it through the speakers"
+
+Great for when you want an audio response right now, without sending anything to your phone.
+
+### Voice Mode — Hands-Free
+
+Instead of switching to voice one message at a time, you can put PAI into a persistent voice mode so every response comes back as audio automatically.
+
+**Voice notes to your phone:**
+
+- "Voice mode on" or "Respond via voice" — every PAI response becomes a WhatsApp voice note
+- "Back to text" or "Text mode" — back to normal text messages
+
+**Audio through your Mac speakers:**
+
+- "Talk to me locally" or "Local voice mode" — every response plays through your speakers
+- "Back to text" — turns it off
+
+Voice mode is perfect for driving, cooking, or any time you can't look at a screen.
+
+### Switching Voices
+
+PAI's default voice is Fable (British male). You can switch voices by name:
+
+- "Hi Nicole" — switches to Nicole's voice
+- "Hi George" — switches to George's voice
+- "Hi Daniel" — switches to Daniel's voice
+- "Back to PAI" or "Default voice" — back to Fable
+
+Voice switches are remembered for the session. You can also set a different default in the config.
+
+### Chat History
+
+PAI can look up your WhatsApp conversations directly — it reads from WhatsApp Desktop's local database, so it's fast and doesn't require your phone to be online:
+
+- "Show me my chats" — lists your recent conversations
+- "Show messages from Randolf" — shows recent messages from that contact
+- "What did Nicole say last?" — PAI finds the conversation and reads it
+
+### Session Management (from Your Phone)
+
+You can control your PAI sessions from WhatsApp itself. Send these commands to your self-chat:
+
+- `/s` — see a list of your active PAI sessions (each Claude window is a session)
+- `/2` — switch to session 2
+- `/2 Cooking Project` — switch to session 2 and name it
+
+This is useful when you have multiple Claude windows open for different projects.
+
+### Available Voices
+
+28 voices across four categories:
+
+| Category | Voices |
+|----------|--------|
+| American Female | af_heart, af_alloy, af_aoede, af_bella, af_jessica, af_kore, af_nicole, af_nova, af_river, af_sarah, af_sky |
+| American Male | am_adam, am_echo, am_eric, am_fenrir, am_liam, am_michael, am_onyx, am_puck, am_santa |
+| British Female | bf_alice, bf_emma, bf_isabella, bf_lily |
+| British Male | bm_daniel, **bm_fable** (PAI default), bm_george, bm_lewis |
+
+All TTS synthesis runs locally on your Mac — no audio is ever sent to any external service.
+
+---
+
 ## MCP tools
 
 Once configured, Claude Code has ten tools available:
