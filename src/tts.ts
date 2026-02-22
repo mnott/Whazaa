@@ -22,6 +22,13 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Resolve ffmpeg path at module load time so launchd environments (which lack
+// /opt/homebrew/bin in PATH) can still find ffmpeg installed via Homebrew.
+const FFMPEG =
+  ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"].find(
+    (p) => p === "ffmpeg" || existsSync(p)
+  ) ?? "ffmpeg";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -106,13 +113,15 @@ export async function textToVoiceNote(
     throw new Error("TTS: text must not be empty");
   }
 
-  // Ensure ffmpeg is available before doing expensive TTS work
-  let ffmpegPath: string;
-  try {
-    ffmpegPath = execSync("which ffmpeg", { timeout: 5_000 }).toString().trim();
-    if (!ffmpegPath) throw new Error("empty path");
-  } catch {
-    throw new Error("ffmpeg not found. Install it with: brew install ffmpeg");
+  // Ensure ffmpeg is available before doing expensive TTS work.
+  // FFMPEG is resolved at module load time via static path lookup so that
+  // launchd environments (which strip /opt/homebrew/bin from PATH) still work.
+  if (FFMPEG === "ffmpeg" && !existsSync("/usr/bin/ffmpeg")) {
+    // Only warn — the bare "ffmpeg" fallback may still work if PATH has it.
+    process.stderr.write(
+      "[whazaa-tts] Warning: ffmpeg not found at known Homebrew paths; " +
+        "falling back to bare 'ffmpeg' (may fail in restricted environments).\n"
+    );
   }
 
   // Resolve voice name
@@ -156,7 +165,7 @@ export async function textToVoiceNote(
     // -ac 1: mono
     // -application voip: optimize for voice
     // -vbr off: constant bitrate for compatibility
-    const ffmpegCmd = `"${ffmpegPath}" -y -i "${wavPath}" -c:a libopus -b:a 64k -ar 24000 -ac 1 -application voip -vbr off "${oggPath}" 2>&1`;
+    const ffmpegCmd = `"${FFMPEG}" -y -i "${wavPath}" -c:a libopus -b:a 64k -ar 24000 -ac 1 -application voip -vbr off "${oggPath}" 2>&1`;
 
     try {
       execSync(ffmpegCmd, { timeout: 30_000, stdio: "pipe" });
