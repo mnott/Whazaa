@@ -2,6 +2,8 @@
 
 WhatsApp bridge for Claude Code. You message yourself on WhatsApp, Claude receives it. Claude responds, you see it on WhatsApp. Your phone becomes a parallel terminal.
 
+Send text, images, voice notes. Manage multiple Claude sessions from your phone. Get TTS responses spoken back to you — 28 voices, fully local, zero cloud dependencies.
+
 ---
 
 ## How it works
@@ -141,6 +143,16 @@ Claude can look up your WhatsApp conversations directly — it reads from WhatsA
 - "Show me my chats" — lists your recent conversations
 - "Show messages from Randolf" — shows recent messages from that contact
 - "What did Nicole say last?" — Claude finds the conversation and reads it
+
+### Sending Images
+
+Send an image to your WhatsApp self-chat and Claude sees it. The watcher downloads the image and types the file path into your active Claude session — Claude reads it natively.
+
+- Send a screenshot from your phone with the caption "What's this error?"
+- Send a photo of a whiteboard with "Transcribe this"
+- Send a design mockup with "Implement this layout"
+
+If the image has a caption, it arrives on the same line as the path so Claude gets both the image and your instruction in one go. Supports JPEG, PNG, WebP, GIF, and stickers.
 
 ### Session Management (from Your Phone)
 
