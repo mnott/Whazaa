@@ -47,7 +47,7 @@ Supporting modules:
 │                                                                 │
 │  startIpcServer()  →  /tmp/whazaa-watcher.sock                  │
 │    Methods: register | status | send | receive | wait | login   │
-│             chats | history                                      │
+│             chats | history                                     │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ Unix Domain Socket (NDJSON)
                            │ /tmp/whazaa-watcher.sock
@@ -66,7 +66,7 @@ Supporting modules:
 │    ├── whatsapp_wait     →  watcher.wait(timeoutMs)             │
 │    ├── whatsapp_login    →  watcher.login()                     │
 │    ├── whatsapp_chats    →  watcher.chats(search?, limit?)      │
-│    └── whatsapp_history  →  watcher.history(jid, count?)       │
+│    └── whatsapp_history  →  watcher.history(jid, count?)        │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ MCP stdio JSON-RPC
                            ▼
