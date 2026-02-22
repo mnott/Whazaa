@@ -51,6 +51,7 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
   proto,
+  downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import type { Chat, Contact } from "@whiskeysockets/baileys";
 import pino from "pino";
@@ -1722,6 +1723,59 @@ end tell`;
   }
 }
 
+// ---------------------------------------------------------------------------
+// Image download helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a WhatsApp image mimetype to a sensible file extension.
+ */
+function mimetypeToExt(mimetype: string | null | undefined): string {
+  if (!mimetype) return "jpg";
+  if (mimetype.includes("png")) return "png";
+  if (mimetype.includes("webp")) return "webp";
+  if (mimetype.includes("gif")) return "gif";
+  return "jpg";
+}
+
+/**
+ * Download a Baileys image (or video/document/sticker) message to a temp file.
+ * Returns the absolute path to the saved file, or null on failure.
+ *
+ * The caller is responsible for deleting the file when done, but since these
+ * files are meant to be read by Claude Code from the terminal, we leave them
+ * in /tmp and let the OS clean them up eventually.
+ */
+async function downloadImageToTemp(
+  msg: proto.IWebMessageInfo,
+  sock: ReturnType<typeof makeWASocket>
+): Promise<string | null> {
+  try {
+    const imageMsg = msg.message?.imageMessage ?? msg.message?.stickerMessage ?? null;
+    if (!imageMsg) return null;
+
+    const ext = mimetypeToExt(imageMsg.mimetype);
+    const filePath = join(tmpdir(), `whazaa-img-${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`);
+
+    const buffer = await downloadMediaMessage(
+      msg as Parameters<typeof downloadMediaMessage>[0],
+      "buffer",
+      {},
+      {
+        logger: pino({ level: "silent" }),
+        reuploadRequest: sock.updateMediaMessage,
+      }
+    );
+
+    writeFileSync(filePath, buffer as Buffer);
+    process.stderr.write(`[whazaa-watch] Image saved to ${filePath}\n`);
+    return filePath;
+  } catch (err) {
+    process.stderr.write(`[whazaa-watch] Image download failed: ${err}\n`);
+    return null;
+  }
+}
+
 // --- WhatsApp watcher connection ---------------------------------------------
 
 interface WatcherConnStatus {
@@ -1995,7 +2049,13 @@ async function connectWatcher(
           msg.message?.extendedTextMessage?.text ??
           null;
 
-        if (!body || !remoteJid) continue;
+        // Detect image (or sticker) messages — these have no text body
+        const isImage =
+          !body &&
+          (msg.message?.imageMessage != null || msg.message?.stickerMessage != null);
+
+        if (!body && !isImage) continue;
+        if (!remoteJid) continue;
 
         const remoteJidNorm = stripDevice(remoteJid);
         const isSelfChat =
@@ -2013,8 +2073,29 @@ async function connectWatcher(
         }
 
         if (isSelfChat) {
-          // Existing behaviour: deliver to iTerm2 and MCP client queue
-          onMessage(body, msgId, timestamp);
+          if (isImage) {
+            // Download image to temp file, then deliver path (+ optional caption) to iTerm2
+            const caption =
+              msg.message?.imageMessage?.caption ??
+              null;
+            // Capture sock reference at this point for the async download
+            const sockRef = sock;
+            if (sockRef) {
+              downloadImageToTemp(msg, sockRef).then((filePath) => {
+                if (!filePath) return;
+                // Deliver image path first, then caption (if any) as a second line
+                const deliveryText = caption
+                  ? `${filePath}\n${caption}`
+                  : filePath;
+                onMessage(deliveryText, msgId, timestamp);
+              }).catch((err) => {
+                process.stderr.write(`[whazaa-watch] Image delivery error: ${err}\n`);
+              });
+            }
+          } else {
+            // Existing behaviour: deliver to iTerm2 and MCP client queue
+            onMessage(body!, msgId, timestamp);
+          }
         } else {
           // Non-self-chat message: store in per-contact queue and update directory
           const senderName =
@@ -2023,10 +2104,16 @@ async function connectWatcher(
               ? null
               : null);
           trackContact(remoteJidNorm, senderName, timestamp);
-          enqueueContactMessage(remoteJidNorm, body, timestamp);
-          process.stderr.write(
-            `[whazaa-watch] Incoming from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${body.slice(0, 60)}\n`
-          );
+          if (body) {
+            enqueueContactMessage(remoteJidNorm, body, timestamp);
+            process.stderr.write(
+              `[whazaa-watch] Incoming from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${body.slice(0, 60)}\n`
+            );
+          } else {
+            process.stderr.write(
+              `[whazaa-watch] Incoming image from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (not forwarded to iTerm2)\n`
+            );
+          }
         }
       }
     });
