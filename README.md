@@ -52,7 +52,7 @@ Restart Claude Code. Whazaa connects automatically from now on.
 
 ## MCP tools
 
-Once configured, Claude Code has five tools available:
+Once configured, Claude Code has seven tools available:
 
 | Tool | Description |
 |------|-------------|
@@ -61,6 +61,8 @@ Once configured, Claude Code has five tools available:
 | `whatsapp_receive` | Drain all queued incoming messages |
 | `whatsapp_wait` | Block until a message arrives (up to timeout) |
 | `whatsapp_login` | Trigger a new QR pairing flow |
+| `whatsapp_chats` | List WhatsApp conversations (from Desktop DB or Baileys) |
+| `whatsapp_history` | Fetch message history for a conversation |
 
 ### whatsapp_send
 
@@ -77,6 +79,24 @@ Efficient alternative to polling. Blocks the tool call until a message arrives o
 ```
 "Message me on WhatsApp when you're done. I'll wait."
 ```
+
+### whatsapp_chats
+
+Lists WhatsApp conversations. Reads from the WhatsApp Desktop macOS SQLite database for a complete inbox view, falling back to Baileys in-memory store (~100–150 recent chats) if the Desktop app is not installed.
+
+Parameters:
+- `search` (optional) — filter results by contact name or phone number
+- `limit` (optional, default 50, max 200) — maximum number of conversations to return
+
+Returns conversation JIDs, display names, and last-message timestamps. JIDs can be passed directly to `whatsapp_history`.
+
+### whatsapp_history
+
+Fetches message history for a conversation. Reads from the WhatsApp Desktop macOS SQLite database (no phone connection required). Falls back to requesting history from Baileys on demand, which requires the phone to be online.
+
+Parameters:
+- `jid` (required) — the conversation JID (e.g. `15551234567@s.whatsapp.net`), as returned by `whatsapp_chats`
+- `count` (optional, default 50, max 500) — number of messages to return (most recent first)
 
 ---
 
