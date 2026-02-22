@@ -2,7 +2,7 @@
 
 WhatsApp bridge for Claude Code. You message yourself on WhatsApp, Claude receives it. Claude responds, you see it on WhatsApp. Your phone becomes a parallel terminal.
 
-Send text, images, voice notes. Manage multiple Claude sessions from your phone. Get TTS responses spoken back to you — 28 voices, fully local, zero cloud dependencies.
+Send text, images, voice notes — even screenshots of your Claude session. Manage multiple Claude sessions from your phone with `/s` and switch between them. Get TTS responses spoken back to you — 28 voices, fully local, zero cloud dependencies.
 
 ---
 
@@ -153,6 +153,20 @@ Send an image to your WhatsApp self-chat and Claude sees it. The watcher downloa
 - Send a design mockup with "Implement this layout"
 
 If the image has a caption, it arrives on the same line as the path so Claude gets both the image and your instruction in one go. Supports JPEG, PNG, WebP, GIF, and stickers.
+
+### Voice Notes In
+
+Send a voice note to your self-chat and Claude receives the transcription. The watcher downloads the audio, runs it through Whisper locally (`large-v3-turbo` model), and types the transcript into your Claude session.
+
+- Record a voice note while walking: "Add a retry mechanism to the API client" — Claude gets the text and starts working
+- Dictate a bug report: "The login page crashes when I tap submit without filling in email"
+- Voice notes from other contacts are also transcribed and available via `whatsapp_receive`
+
+Works in English, German, and 90+ other languages. Transcription runs entirely on your Mac — nothing leaves your machine.
+
+### Screenshots
+
+Send `/ss` from your phone and the watcher captures the active Claude session's iTerm2 window and sends it back to WhatsApp as an image. Useful for checking on long-running tasks without switching to your desk.
 
 ### Session Management (from Your Phone)
 
@@ -352,7 +366,9 @@ Certain messages sent from your phone are intercepted by the watcher and handled
 |---------|-------------|
 | `/relocate <path>` or `/r <path>` | Open a new iTerm2 tab in the given directory and start Claude there |
 | `/sessions` or `/s` | List open Claude sessions with names; reply `/N` to switch, `/N name` to switch and rename |
-| _(image)_ | Send an image to your self-chat — the watcher downloads it and types the path into Claude |
+| `/ss` or `/screenshot` | Capture the active Claude session's iTerm2 window and send it back as an image |
+| _(image)_ | Send an image — the watcher downloads it and types the path into Claude |
+| _(voice note)_ | Send a voice note — the watcher transcribes it with Whisper and types the text into Claude |
 
 ### /relocate
 
