@@ -2176,6 +2176,15 @@ export async function watch(rawSessionId?: string): Promise<void> {
         return;
       }
 
+      // If no active session tracked yet, auto-discover from live sessions
+      if (!activeItermSessionId && liveSessions.length > 0) {
+        const firstClaude = liveSessions.find((s) => isClaudeRunningInSession(s.id));
+        if (firstClaude) {
+          activeSessionId = firstClaude.id;
+          activeItermSessionId = firstClaude.id;
+        }
+      }
+
       // Build display list: prefer user.paiName session variable, then registry,
       // then cwd basename, then iTerm2 session name.
       const lines = liveSessions.map((s, i) => {
@@ -2189,7 +2198,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
           ?? (regEntry ? regEntry.name : null)
           ?? (s.path ? basename(s.path) : null)
           ?? s.name;
-        const isActive = regEntry && activeClientId === regEntry.sessionId;
+        const isActive = (regEntry && activeClientId === regEntry.sessionId) || s.id === activeItermSessionId;
         return `${i + 1}. ${label}${isActive ? " \u2190 active" : ""}`;
       });
       const reply = lines.join("\n");
