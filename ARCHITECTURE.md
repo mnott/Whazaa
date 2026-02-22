@@ -15,6 +15,7 @@ Supporting modules:
 - `src/ipc-client.ts` — client-side IPC transport used by the MCP server
 - `src/auth.ts` — credentials directory resolution and QR code display
 - `src/whatsapp.ts` — standalone Baileys connection used only by the setup wizard
+- `src/tts.ts` — Kokoro-js TTS engine — text to WAV/OGG, local speaker playback
 
 ---
 
@@ -41,13 +42,15 @@ Supporting modules:
 │    └── handleMessage()                                          │
 │          ├── /relocate <path>  →  handleRelocate()              │
 │          ├── /sessions         →  listClaudeSessions()          │
-│          ├── numeric reply     →  switch active session         │
+│          ├── /N                →  switch active session         │
+│          ├── /N name           →  switch AND rename session     │
 │          ├── dispatchIncomingMessage() (IPC queue)              │
 │          └── deliverMessage() (iTerm2 via AppleScript)          │
 │                                                                 │
 │  startIpcServer()  →  /tmp/whazaa-watcher.sock                  │
 │    Methods: register | status | send | receive | wait | login   │
-│             chats | history                                     │
+│             chats | history | tts | speak | voice_config        │
+│             rename | contacts                                   │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ Unix Domain Socket (NDJSON)
                            │ /tmp/whazaa-watcher.sock
@@ -60,13 +63,16 @@ Supporting modules:
 │    └── per-call socket: connect → send → receive → close        │
 │                                                                 │
 │  MCP tools (stdio JSON-RPC)                                     │
-│    ├── whatsapp_status   →  watcher.status()                    │
-│    ├── whatsapp_send     →  watcher.send(message)               │
-│    ├── whatsapp_receive  →  watcher.receive()                   │
-│    ├── whatsapp_wait     →  watcher.wait(timeoutMs)             │
-│    ├── whatsapp_login    →  watcher.login()                     │
-│    ├── whatsapp_chats    →  watcher.chats(search?, limit?)      │
-│    └── whatsapp_history  →  watcher.history(jid, count?)        │
+│    ├── whatsapp_status        →  watcher.status()               │
+│    ├── whatsapp_send          →  watcher.send(message)          │
+│    ├── whatsapp_receive       →  watcher.receive()              │
+│    ├── whatsapp_wait          →  watcher.wait(timeoutMs)        │
+│    ├── whatsapp_login         →  watcher.login()                │
+│    ├── whatsapp_chats         →  watcher.chats(search?, limit?) │
+│    ├── whatsapp_history       →  watcher.history(jid, count?)   │
+│    ├── whatsapp_tts           →  watcher.tts(text, voice, jid?) │
+│    ├── whatsapp_speak         →  watcher.speak(text, voice?)    │
+│    └── whatsapp_voice_config  →  watcher.voiceConfig(action)    │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ MCP stdio JSON-RPC
                            ▼
@@ -94,7 +100,7 @@ The watcher and MCP server communicate over a Unix Domain Socket at `/tmp/whazaa
 
 - `id` — UUID generated per call, echoed in the response for correlation
 - `sessionId` — the calling MCP server's `TERM_SESSION_ID` (set by iTerm2)
-- `method` — one of the six methods below
+- `method` — one of the methods listed below
 - `params` — method-specific parameters
 
 ### Response format
@@ -139,11 +145,20 @@ Returns message history for a conversation JID. Reads from the Desktop DB when a
 
 #### register
 
-Registers the calling session as a known client and initializes its message queue. No params. The client is not made active until it calls `send`.
+Registers the calling session as a known client and initializes its message queue. The watcher assigns a human-readable name derived from the session's working directory. No params. The client is not made active until it calls `send`.
 
 ```json
 // params: {}
 // result: { "registered": true }
+```
+
+#### rename
+
+Updates the display name for a registered session.
+
+```json
+// params: { "name": "My Project" }
+// result: { "success": true, "name": "My Project" }
 ```
 
 #### status
@@ -196,6 +211,38 @@ Triggers a new Baileys QR pairing flow on the watcher. The QR code is printed to
 // result: { "message": "QR pairing initiated. Check the watcher terminal..." }
 ```
 
+#### tts
+
+Converts text to speech using the Kokoro-js engine and sends the result as a WhatsApp voice note (OGG Opus). The TTS engine is lazy-initialized on first call and cached for subsequent calls. Requires ffmpeg for WAV to OGG conversion.
+
+```json
+// params: { "text": "Hello from Claude", "voice": "bm_fable", "jid": "15551234567@s.whatsapp.net" }
+// result: { "voice": "bm_fable", "bytesSent": 24680, "targetJid": "15551234567@s.whatsapp.net" }
+```
+
+If `jid` is omitted, the voice note is sent to the caller's self-chat.
+
+#### speak
+
+Synthesizes text using the same Kokoro-js engine as `tts` and plays the audio through the Mac's local speakers via `afplay`. Non-blocking: playback runs in the background while the watcher continues. No WhatsApp connection required.
+
+```json
+// params: { "text": "Hello from Claude", "voice": "bm_fable" }
+// result: { "success": true, "voice": "bm_fable" }
+```
+
+#### voice_config
+
+Gets or updates the voice mode configuration. Configuration is persisted to `~/.whazaa/voice-config.json`.
+
+```json
+// params: { "action": "get" }
+// result: { "success": true, "config": { "voiceMode": false, "localMode": false, "defaultVoice": "bm_fable", "personas": { "Nicole": "af_nicole" } } }
+
+// params: { "action": "set", "updates": { "voiceMode": true, "defaultVoice": "af_bella" } }
+// result: { "success": true, "config": { ... updated config ... } }
+```
+
 ---
 
 ## Session routing
@@ -203,6 +250,16 @@ Triggers a new Baileys QR pairing flow on the watcher. The QR code is printed to
 The watcher maintains per-client state to support multiple simultaneous Claude Code sessions.
 
 ```typescript
+interface RegisteredSession {
+  sessionId: string;       // TERM_SESSION_ID
+  name: string;            // Human-readable name (derived from working directory)
+  itermSessionId?: string; // iTerm2 session UUID (for tab title)
+  registeredAt: number;    // timestamp
+}
+
+// Registry of all connected MCP sessions
+const sessionRegistry = new Map<string, RegisteredSession>();
+
 // The session ID of the most-recently-active MCP client
 let activeClientId: string | null = null;
 
@@ -214,6 +271,10 @@ const clientWaiters = new Map<string, Array<(msgs: QueuedMessage[]) => void>>();
 ```
 
 **Active session selection:** Whichever MCP client most recently called `send` becomes `activeClientId`. Incoming WhatsApp messages are routed to that client's queue only. Registration via `register` does not change the active client — it only initializes the queue.
+
+**Named sessions:** When a session registers, the watcher assigns a display name derived from the Claude process's working directory (e.g. a session in `~/projects/myapp` registers as `myapp`). Names can be updated via `/N name` from WhatsApp or via the `rename` IPC method.
+
+**Sticky routing:** Only the `/N` command changes the active session. Sending a message does NOT switch routing. This prevents accidental session-switches when Claude sends WhatsApp acks.
 
 **iTerm2 delivery is unconditional:** The watcher types all incoming messages into iTerm2 regardless of which MCP client is active. IPC queue routing is additive — it does not replace iTerm2 delivery.
 
@@ -233,6 +294,58 @@ function dispatchIncomingMessage(body: string, timestamp: number): void {
   }
 }
 ```
+
+---
+
+## TTS pipeline
+
+The `tts.ts` module implements local text-to-speech using [Kokoro-js](https://github.com/hexgrad/kokoro).
+
+```
+textToVoiceNote(text, voice?)
+  │
+  ├── ensureInitialized()       // lazy-load KokoroTTS singleton (~160 MB model, cached)
+  ├── ttsInstance.generate()    // Float32 PCM at 24 kHz
+  ├── audio.toWav()             // write temp WAV file
+  ├── ffmpeg -c:a libopus       // convert WAV → OGG Opus (64 kbps, mono, 24 kHz)
+  └── return OGG buffer         // ready for Baileys sendMessage({ audio, ptt: true })
+
+speakLocally(text, voice?)
+  │
+  ├── ensureInitialized()       // same singleton
+  ├── ttsInstance.generate()    // Float32 PCM
+  ├── audio.toWav()             // write temp WAV file
+  └── afplay <wavPath>          // macOS speaker playback (detached, non-blocking)
+```
+
+**Voices:** 28 Kokoro voices across four categories — American Female (11), American Male (9), British Female (4), British Male (4). Default: `bm_fable`.
+
+**ffmpeg resolution:** The module resolves the ffmpeg binary at load time by checking `/opt/homebrew/bin/ffmpeg` and `/usr/local/bin/ffmpeg` before falling back to a bare `ffmpeg` PATH lookup. This ensures the watcher (which runs under launchd with a stripped PATH) can find Homebrew-installed ffmpeg.
+
+**Temp file cleanup:** WAV and OGG temp files are always deleted in a `finally` block. The `speakLocally` cleanup happens asynchronously in the `afplay` close handler.
+
+---
+
+## Voice config persistence
+
+Voice mode configuration is loaded at watcher startup and written on every update.
+
+```
+~/.whazaa/voice-config.json
+  {
+    "defaultVoice": "bm_fable",
+    "voiceMode": false,
+    "localMode": false,
+    "personas": {
+      "Nicole": "af_nicole",
+      "George": "bm_george",
+      "Daniel": "bm_daniel",
+      "Fable":  "bm_fable"
+    }
+  }
+```
+
+`voiceMode: true` signals that Claude should respond with voice (via `whatsapp_tts` or `whatsapp_speak`). `localMode: true` selects local speaker playback over WhatsApp voice notes. The `personas` map lets Claude address voice responses to named voices (e.g. "speak as Nicole").
 
 ---
 
@@ -297,7 +410,7 @@ The watcher uses AppleScript (`osascript`) for all iTerm2 interaction. All `spaw
 1. `ps -eo pid,tty,comm` to find the Claude process PID for the TTY
 2. `lsof -a -d cwd -p <pid> -Fn` to read the current working directory
 
-Used by `listClaudeSessions()` to show meaningful paths in `/sessions` output.
+Used by `listClaudeSessions()` to show meaningful paths in `/sessions` output and to derive session names on registration.
 
 ---
 
@@ -318,8 +431,19 @@ Pattern: `/relocate <path>` or `/r <path>`
 ### /sessions (and /s)
 
 1. `listClaudeSessions()` — return all sessions whose tab name contains "claude"
-2. Send a numbered list to WhatsApp via `watcherSendMessage`
-3. User replies `/1`, `/2`, etc. to switch — these are handled by the `/N` command handler (no pending state)
+2. Build a numbered list, marking the currently active session with `*`
+3. Include the session's registered name and working directory
+4. Send the list to WhatsApp via `watcherSendMessage`
+5. User replies `/1`, `/2`, etc. to switch active session
+6. User replies `/1 My Project` to switch AND rename the session
+
+### /N (numeric session switch)
+
+Pattern: `/1`, `/2`, `/3`, ...
+
+1. Look up the Nth session in `listClaudeSessions()` order
+2. Set it as `activeClientId` (sticky routing)
+3. Optionally rename if text follows the number (e.g. `/2 Backend`)
 
 ---
 
@@ -359,6 +483,7 @@ src/
   auth.ts         Auth directory resolution, QR display (terminal + browser)
   whatsapp.ts     Standalone Baileys connection (setup wizard only)
   desktop-db.ts   Readonly SQLite reader for WhatsApp Desktop macOS database
+  tts.ts          Kokoro-js TTS engine — text to WAV/OGG, local speaker playback
 
 scripts/
   watcher-ctl.sh  launchd agent install/start/stop/status helper
@@ -409,7 +534,12 @@ Rules enforced throughout the codebase:
 | `@modelcontextprotocol/sdk` | MCP server and stdio transport |
 | `@whiskeysockets/baileys` | WhatsApp Web multi-device protocol |
 | `better-sqlite3` | Readonly access to WhatsApp Desktop macOS SQLite database |
+| `kokoro-js` | Local TTS engine (Kokoro-82M ONNX model, 28 voices) |
 | `pino` | Logger (used silenced, required by Baileys) |
 | `qrcode` | SVG QR generation for browser display |
 | `qrcode-terminal` | ASCII QR rendering for terminal display |
 | `zod` | MCP tool parameter schema validation |
+
+**System requirements:**
+- `ffmpeg` — required for WAV to OGG Opus conversion in `whatsapp_tts`; must be installed separately (e.g. `brew install ffmpeg`)
+- `afplay` — macOS built-in audio player, used by `whatsapp_speak`
