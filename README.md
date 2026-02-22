@@ -2,7 +2,7 @@
 
 WhatsApp bridge for Claude Code. You message yourself on WhatsApp, Claude receives it. Claude responds, you see it on WhatsApp. Your phone becomes a parallel terminal.
 
-Send text, images, voice notes — even screenshots of your Claude session. Manage multiple Claude sessions from your phone with `/s` and switch between them. Get TTS responses spoken back to you — 28 voices, fully local, zero cloud dependencies.
+Send text, images, voice notes — even screenshots of your Claude session. Manage multiple Claude sessions from your phone with `/s`, switch between them, or `/kill` a stuck one and restart it fresh. Get TTS responses spoken back to you — 28 voices, fully local, zero cloud dependencies.
 
 ---
 
@@ -367,6 +367,7 @@ Certain messages sent from your phone are intercepted by the watcher and handled
 | `/relocate <path>` or `/r <path>` | Open a new iTerm2 tab in the given directory and start Claude there |
 | `/sessions` or `/s` | List open Claude sessions with names; reply `/N` to switch, `/N name` to switch and rename |
 | `/ss` or `/screenshot` | Capture the active Claude session's iTerm2 window and send it back as an image |
+| `/kill N` or `/k N` | Kill a stuck Claude session and restart it fresh in the same directory |
 | _(image)_ | Send an image — the watcher downloads it and types the path into Claude |
 | _(voice note)_ | Send a voice note — the watcher transcribes it with Whisper and types the text into Claude |
 
@@ -386,6 +387,17 @@ After relocating, subsequent messages are delivered to the new session.
 Reply `/s` to get a numbered list of open Claude sessions with their working directories and names. The currently active session is marked with `*`.
 
 Switch to a session with `/1`, `/2`, etc. Switch and rename in one step with `/1 My Project`. Session names are stored as iTerm2 session variables and persist across watcher restarts.
+
+### /kill
+
+```
+/kill 1
+/k 2
+```
+
+Kill a stuck Claude session (e.g. one that ran out of context and is unresponsive) and restart it. The watcher finds the Claude process via the session's TTY, sends SIGTERM, waits for the shell prompt to return, then types `claude` to restart in the same directory.
+
+Use `/s` first to see which number corresponds to which session.
 
 ### Image forwarding
 
