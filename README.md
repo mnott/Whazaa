@@ -26,6 +26,7 @@ Your phone
               └──> MCP Server (started by Claude Code)
                        |
                        └──> whatsapp_send / receive / status / wait / login
+                            whatsapp_tts / whatsapp_speak / whatsapp_voice_config
 ```
 
 The separation means you can have multiple Claude Code sessions open simultaneously. Each MCP server instance registers its `TERM_SESSION_ID` with the watcher, and whichever session most recently sent a message becomes the active recipient for incoming messages.
@@ -50,19 +51,38 @@ Restart Claude Code. Whazaa connects automatically from now on.
 
 ---
 
+## Prerequisites
+
+- Node.js >= 18
+- macOS with [iTerm2](https://iterm2.com/) for the `watch` command and iTerm2 delivery
+- [ffmpeg](https://ffmpeg.org/) for TTS voice note conversion (WAV to OGG Opus)
+
+Install ffmpeg via Homebrew:
+
+```bash
+brew install ffmpeg
+```
+
+The Kokoro TTS model (~160 MB) is downloaded automatically on first use of `whatsapp_tts` or `whatsapp_speak` and cached locally. Subsequent calls are fast.
+
+---
+
 ## MCP tools
 
-Once configured, Claude Code has seven tools available:
+Once configured, Claude Code has ten tools available:
 
 | Tool | Description |
 |------|-------------|
 | `whatsapp_status` | Check connection state and phone number |
-| `whatsapp_send` | Send a message to your WhatsApp self-chat |
+| `whatsapp_send` | Send a message to your WhatsApp self-chat (or any contact) |
 | `whatsapp_receive` | Drain all queued incoming messages |
 | `whatsapp_wait` | Block until a message arrives (up to timeout) |
 | `whatsapp_login` | Trigger a new QR pairing flow |
 | `whatsapp_chats` | List WhatsApp conversations (from Desktop DB or Baileys) |
 | `whatsapp_history` | Fetch message history for a conversation |
+| `whatsapp_tts` | Convert text to speech and send as a WhatsApp voice note |
+| `whatsapp_speak` | Speak text aloud through Mac speakers (no WhatsApp needed) |
+| `whatsapp_voice_config` | Get or set voice mode configuration |
 
 ### whatsapp_send
 
@@ -71,6 +91,15 @@ Sends a message to your self-chat. Supports Markdown formatting converted to Wha
 - `**bold**` becomes `*bold*`
 - `*italic*` becomes `_italic_`
 - `` `code` `` becomes ` ```code``` `
+
+Optionally send as a TTS voice note by setting the `voice` parameter:
+
+```
+voice='true'         Use default voice (bm_fable)
+voice='bm_george'    Use a specific voice
+```
+
+Supports an optional `recipient` parameter: a phone number (e.g. `+41764502698`), WhatsApp JID, or contact name.
 
 ### whatsapp_wait
 
@@ -97,6 +126,52 @@ Fetches message history for a conversation. Reads from the WhatsApp Desktop macO
 Parameters:
 - `jid` (required) — the conversation JID (e.g. `15551234567@s.whatsapp.net`), as returned by `whatsapp_chats`
 - `count` (optional, default 50, max 500) — number of messages to return (most recent first)
+
+### whatsapp_tts
+
+Converts text to speech and sends it as a WhatsApp voice note.
+
+- Uses [Kokoro-js](https://github.com/hexgrad/kokoro) — 100% local, no internet required after first run
+- The model (~160 MB) is downloaded on first use and cached locally
+- Requires `ffmpeg` for WAV to OGG Opus conversion
+- Without a recipient, sends to your self-chat; with a recipient, sends to any contact or group
+
+**Available voices (28 total):**
+
+| Category | Voices |
+|----------|--------|
+| American Female | `af_heart`, `af_alloy`, `af_aoede`, `af_bella`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky` |
+| American Male | `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa` |
+| British Female | `bf_alice`, `bf_emma`, `bf_isabella`, `bf_lily` |
+| British Male | `bm_daniel`, `bm_fable`, `bm_george`, `bm_lewis` |
+
+Default voice: `bm_fable`
+
+Parameters:
+- `message` (required) — text to convert to speech
+- `voice` (optional, default `bm_fable`) — voice name from the table above
+- `recipient` (optional) — phone number, JID, or contact name; omit for self-chat
+
+### whatsapp_speak
+
+Same TTS engine as `whatsapp_tts`, but plays audio through the Mac's speakers instead of sending a WhatsApp voice note. No WhatsApp connection required. Audio plays in the background without blocking other operations.
+
+Parameters:
+- `message` (required) — text to speak aloud
+- `voice` (optional, default `bm_fable`) — voice name (same list as `whatsapp_tts`)
+
+### whatsapp_voice_config
+
+Gets or sets the voice mode configuration. Configuration is persisted to `~/.whazaa/voice-config.json` and survives watcher restarts.
+
+Parameters:
+- `action` (required) — `'get'` to read current config, `'set'` to update it
+- `voiceMode` (optional) — `true` to enable voice responses, `false` to use text
+- `localMode` (optional) — when `true` and `voiceMode` is `true`, use `whatsapp_speak` (Mac speakers) instead of `whatsapp_tts` (WhatsApp voice notes)
+- `defaultVoice` (optional) — default voice name (e.g. `'bm_fable'`)
+- `personas` (optional) — map of names to voice IDs (e.g. `{"Nicole": "af_nicole", "George": "bm_george"}`)
+
+Default personas: Nicole → `af_nicole`, George → `bm_george`, Daniel → `bm_daniel`, Fable → `bm_fable`
 
 ---
 
@@ -164,7 +239,7 @@ Certain messages sent from your phone are intercepted by the watcher and handled
 | Command | Description |
 |---------|-------------|
 | `/relocate <path>` or `/r <path>` | Open a new iTerm2 tab in the given directory and start Claude there |
-| `/sessions` or `/s` | List open Claude sessions and offer to switch between them |
+| `/sessions` or `/s` | List open Claude sessions with names; reply `/N` to switch, `/N name` to switch and rename |
 
 ### /relocate
 
@@ -179,7 +254,9 @@ After relocating, subsequent messages are delivered to the new session.
 
 ### /sessions
 
-Reply `/s` to get a numbered list of open Claude sessions with their working directories. Switch with `/1`, `/2`, etc.
+Reply `/s` to get a numbered list of open Claude sessions with their working directories and names. The currently active session is marked with `*`.
+
+Switch to a session with `/1`, `/2`, etc. Switch and rename in one step with `/1 My Project`. Session names are stored as iTerm2 session variables and persist across watcher restarts.
 
 ---
 
@@ -188,6 +265,10 @@ Reply `/s` to get a numbered list of open Claude sessions with their working dir
 Whazaa supports multiple simultaneous Claude Code windows. Each MCP server instance registers its `TERM_SESSION_ID` when it starts. Whichever session most recently called `whatsapp_send` becomes the active recipient for incoming messages.
 
 The watcher maintains a separate incoming message queue for each registered session. If no session has sent a message yet, the first registered session is used.
+
+Sessions register with a name derived from the working directory (e.g. a Claude session in `~/projects/myapp` registers as `myapp`). Use `/s` to see all sessions and `/N name` to assign a custom name.
+
+Routing is sticky: only the `/N` command changes the active session, not sending a message. This means switching sessions from your phone requires an explicit `/N` command.
 
 ---
 
@@ -231,6 +312,7 @@ messages that arrived while you were offline.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WHAZAA_AUTH_DIR` | `~/.whazaa/auth/` | Directory for WhatsApp session credentials |
+| `WHAZAA_TTS_VOICE` | `bm_fable` | Default TTS voice (overridden by voice-config.json) |
 
 ---
 
@@ -303,6 +385,14 @@ This happens when multiple Whazaa MCP processes compete for the same WhatsApp se
 
 Whazaa reconnects automatically with exponential backoff (1s to 60s). Check your network. If the issue persists, call `whatsapp_login` to re-establish the session.
 
+**TTS fails with "ffmpeg not found"**
+
+Install ffmpeg: `brew install ffmpeg`. The watcher searches `/opt/homebrew/bin/ffmpeg` and `/usr/local/bin/ffmpeg` before falling back to the system PATH, so Homebrew installs are found even in restricted launchd environments.
+
+**First TTS call takes a long time**
+
+The Kokoro model (~160 MB) is downloaded on first use and cached locally. Subsequent calls are fast. Check your network if the download stalls.
+
 ---
 
 ## Security
@@ -310,6 +400,7 @@ Whazaa reconnects automatically with exponential backoff (1s to 60s). Check your
 - Session credentials are stored locally in `~/.whazaa/auth/`. Treat them like passwords — they grant full access to your WhatsApp Web session.
 - Whazaa only reads and sends messages in your self-chat. It cannot access other conversations.
 - No data is sent to any third-party service. All communication is directly with WhatsApp's servers via Baileys.
+- TTS synthesis is fully local (Kokoro-js runs on-device). Audio never leaves your machine.
 
 ---
 
@@ -318,6 +409,7 @@ Whazaa reconnects automatically with exponential backoff (1s to 60s). Check your
 - Node.js >= 18
 - WhatsApp account (any — multi-device support is standard)
 - macOS with [iTerm2](https://iterm2.com/) for the `watch` command and iTerm2 delivery
+- [ffmpeg](https://ffmpeg.org/) for TTS voice note sending (`whatsapp_tts`)
 
 ---
 
