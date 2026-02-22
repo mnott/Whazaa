@@ -105,6 +105,13 @@ const sessionRegistry = new Map<string, RegisteredSession>();
 /** The session ID of the most-recently-active MCP client */
 let activeClientId: string | null = null;
 
+/**
+ * The iTerm2 session UUID of the currently-active Claude window.
+ * Set by /N switch commands and delivery fallback logic.
+ * Promoted to module-level so handleScreenshot() can access it.
+ */
+let activeItermSessionId: string = "";
+
 /** Per-client incoming message queues, keyed by sessionId */
 const clientQueues = new Map<string, QueuedMessage[]>();
 
@@ -1613,13 +1620,58 @@ async function handleScreenshot(): Promise<void> {
   const filePath = join(tmpdir(), `whazaa-screenshot-${Date.now()}.png`);
 
   try {
-    // Get the window ID of the frontmost iTerm2 window
+    // Resolve the window ID to capture.
+    // Priority:
+    //   1. Registry entry for activeClientId (most precise — set when MCP client registered)
+    //   2. activeItermSessionId (set by /N switch commands — always up-to-date)
+    //   3. Fall back to window 1 (last resort)
     let windowId: string;
     try {
-      windowId = execSync(
-        'osascript -e \'tell application "iTerm2" to id of window 1\'',
-        { timeout: 10_000 }
-      ).toString().trim();
+      const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
+      // Prefer registry itermSessionId; fall back to the module-level activeItermSessionId
+      const itermSessionId = activeEntry?.itermSessionId ?? (activeItermSessionId || undefined);
+
+      if (itermSessionId) {
+        // Walk windows → tabs → sessions to find the one with this session UUID.
+        // CRITICAL: also bring the matching tab to front BEFORE capturing —
+        // otherwise all tabs in the same window return the same window ID and
+        // screencapture always shows whichever tab is currently visible.
+        const script = `tell application "iTerm2"
+  repeat with w in windows
+    set tabCount to count of tabs of w
+    repeat with tabIdx from 1 to tabCount
+      set t to tab tabIdx of w
+      repeat with s in sessions of t
+        if id of s is "${itermSessionId}" then
+          select t
+          delay 0.3
+          return id of w
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`;
+        const found = runAppleScript(script);
+        if (found && found !== "") {
+          windowId = found;
+          process.stderr.write(`[whazaa-watch] /ss: using window ${windowId} (from iTerm session ${itermSessionId})\n`);
+        } else {
+          // Session UUID not found in any window — fall back to window 1
+          windowId = execSync(
+            'osascript -e \'tell application "iTerm2" to id of window 1\'',
+            { timeout: 10_000 }
+          ).toString().trim();
+          process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
+        }
+      } else {
+        // No active session known — fall back to window 1
+        windowId = execSync(
+          'osascript -e \'tell application "iTerm2" to id of window 1\'',
+          { timeout: 10_000 }
+        ).toString().trim();
+        process.stderr.write(`[whazaa-watch] /ss: no active session tracked, falling back to window 1 (id=${windowId})\n`);
+      }
     } catch {
       await watcherSendMessage("Error: iTerm2 is not running or has no open windows.").catch(() => {});
       return;
@@ -1629,6 +1681,9 @@ async function handleScreenshot(): Promise<void> {
       await watcherSendMessage("Error: Could not get iTerm2 window ID.").catch(() => {});
       return;
     }
+
+    // Tab-switch delay is now inside the AppleScript (delay 0.5) to ensure
+    // the window buffer is updated before screencapture reads it.
 
     // Capture the window: -x (no shutter sound), -o (no shadow), -l (window by ID)
     execSync(`screencapture -x -o -l ${windowId} "${filePath}"`, { timeout: 15_000 });
@@ -2046,6 +2101,8 @@ export async function watch(rawSessionId?: string): Promise<void> {
   let activeSessionId = rawSessionId
     ? rawSessionId.includes(":") ? rawSessionId.split(":").pop()! : rawSessionId
     : "";
+  // Keep module-level activeItermSessionId in sync with the local activeSessionId
+  activeItermSessionId = activeSessionId;
 
   console.log(`Whazaa Watch`);
   console.log(`  Session:  ${activeSessionId || "(auto-discover)"}`);
@@ -2089,6 +2146,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
         const newSessionId = handleRelocate(targetPath);
         if (newSessionId) {
           activeSessionId = newSessionId;
+          activeItermSessionId = newSessionId;
           process.stderr.write(`[whazaa-watch] Active session switched to ${newSessionId}\n`);
         }
         return;
@@ -2171,6 +2229,7 @@ end tell`;
       const focusResult = runAppleScript(focusScript);
       if (focusResult === "focused") {
         activeSessionId = chosen.id;
+        activeItermSessionId = chosen.id;
 
         // Also update activeClientId to the registered session for this iTerm2 session
         const regEntry = [...sessionRegistry.values()].find(
@@ -2238,6 +2297,7 @@ end tell`;
     );
     if (found && isClaudeRunningInSession(found)) {
       activeSessionId = found;
+      activeItermSessionId = found;
       if (typeIntoSession(activeSessionId, text)) {
         consecutiveFailures = 0;
         return true;
@@ -2251,6 +2311,7 @@ end tell`;
     const created = createClaudeSession();
     if (created) {
       activeSessionId = created;
+      activeItermSessionId = created;
       if (typeIntoSession(activeSessionId, text)) {
         consecutiveFailures = 0;
         return true;
