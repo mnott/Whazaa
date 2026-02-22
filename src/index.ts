@@ -39,7 +39,8 @@ import {
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 import { watch } from "./watch.js";
-import { WatcherClient } from "./ipc-client.js";
+import { WatcherClient, ChatsResult, HistoryResult } from "./ipc-client.js";
+import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
 // ---------------------------------------------------------------------------
 // Setup wizard
@@ -267,21 +268,31 @@ server.tool(
 server.tool(
   "whatsapp_send",
   [
-    "Send a message to yourself via WhatsApp self-chat.",
+    "Send a WhatsApp message.",
+    "Without a recipient, sends to your own self-chat (same as before).",
+    "With a recipient, sends to any contact or group.",
+    "Recipient can be a phone number with country code (e.g. '+41764502698'),",
+    "a WhatsApp JID (e.g. '41764502698@s.whatsapp.net'), or a contact name.",
     "Supports basic Markdown: **bold**, *italic*, `code`.",
-    "The message appears in your own WhatsApp chat with yourself.",
   ].join(" "),
   {
     message: z
       .string()
       .min(1)
-      .describe("The message text to send to your WhatsApp self-chat"),
+      .describe("The message text to send"),
+    recipient: z
+      .string()
+      .optional()
+      .describe(
+        "Optional recipient: phone number (e.g. '+41764502698'), WhatsApp JID, or contact name. Omit to send to self-chat."
+      ),
   },
-  async ({ message }) => {
+  async ({ message, recipient }) => {
     try {
-      const result = await watcher.send(message);
+      const result = await watcher.send(message, recipient);
+      const dest = result.targetJid ?? "self-chat";
       return {
-        content: [{ type: "text", text: `Sent: ${result.preview}` }],
+        content: [{ type: "text", text: `Sent to ${dest}: ${result.preview}` }],
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -300,14 +311,23 @@ server.tool(
 server.tool(
   "whatsapp_receive",
   [
-    "Return all queued incoming WhatsApp messages received since the last call, then clear the queue.",
-    "Messages are from your own WhatsApp number (self-chat) — i.e. messages you type on your phone.",
+    "Return queued incoming WhatsApp messages since the last call, then clear the queue.",
+    "Without 'from': returns self-chat messages (default, backwards compatible).",
+    "With 'from' set to a phone number, JID, or contact name: returns messages from that contact.",
+    "With 'from' set to 'all': returns messages from all chats (self-chat + all contacts), prefixed with sender JID.",
     "Returns 'No new messages.' if the queue is empty.",
   ].join(" "),
-  {},
-  async () => {
+  {
+    from: z
+      .string()
+      .optional()
+      .describe(
+        "Optional sender filter: phone number, JID, contact name, or 'all'. Omit for self-chat only."
+      ),
+  },
+  async ({ from }) => {
     try {
-      const result = await watcher.receive();
+      const result = await watcher.receive(from);
       const { messages } = result;
 
       if (messages.length === 0) {
@@ -322,6 +342,160 @@ server.tool(
         .join("\n");
 
       return { content: [{ type: "text", text: formatted }] };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_contacts
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_contacts",
+  [
+    "List recently seen WhatsApp contacts.",
+    "Returns contacts that have sent or received messages in this session, most recent first.",
+    "Optionally filter by name or phone number using the 'search' parameter.",
+    "Use the returned phone number or JID as the 'recipient' parameter for whatsapp_send.",
+  ].join(" "),
+  {
+    search: z
+      .string()
+      .optional()
+      .describe("Optional search string to filter contacts by name or phone number"),
+    limit: z
+      .number()
+      .min(1)
+      .max(200)
+      .default(50)
+      .describe("Maximum number of contacts to return (default 50)"),
+  },
+  async ({ search, limit }) => {
+    try {
+      const result = await watcher.contacts(search, limit);
+      const { contacts } = result;
+
+      if (contacts.length === 0) {
+        const msg = search
+          ? `No contacts found matching '${search}'.`
+          : "No contacts seen yet. Send a message first, or wait for incoming messages.";
+        return { content: [{ type: "text", text: msg }] };
+      }
+
+      const lines = contacts.map((c) => {
+        const name = c.name ? `${c.name} ` : "";
+        const ts = new Date(c.lastSeen).toISOString();
+        return `${name}+${c.phoneNumber} (${c.jid}) — last seen ${ts}`;
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${contacts.length} contact(s):\n${lines.join("\n")}`,
+          },
+        ],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_chats
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_chats",
+  [
+    "List WhatsApp chat conversations (inbox).",
+    "Reads directly from the WhatsApp Desktop macOS SQLite database when available (complete inbox, no Baileys sync required).",
+    "Falls back to the Baileys in-memory store when the Desktop DB is not present (~100-150 chats synced on connect).",
+    "Use the returned JID as the 'recipient' parameter for whatsapp_send,",
+    "or with whatsapp_receive to read messages from a specific contact.",
+    "Optionally filter by name or phone number using the 'search' parameter.",
+  ].join(" "),
+  {
+    search: z
+      .string()
+      .optional()
+      .describe("Optional search string to filter chats by name or phone number"),
+    limit: z
+      .number()
+      .min(1)
+      .max(200)
+      .default(50)
+      .describe("Maximum number of chats to return (default 50)"),
+  },
+  async ({ search, limit }) => {
+    try {
+      // Try the Desktop DB first — it has the full inbox without needing Baileys sync
+      const desktopChats = listChats(search, limit);
+
+      if (desktopChats !== null) {
+        // Desktop DB is available
+        if (desktopChats.length === 0) {
+          const msg = search
+            ? `No chats found matching '${search}'.`
+            : "No chats found in the WhatsApp Desktop database.";
+          return { content: [{ type: "text", text: msg }] };
+        }
+
+        const lines = desktopChats.map((c) => {
+          const ts = c.lastMessageDate || "unknown";
+          const unread = c.unreadCount > 0 ? ` [${c.unreadCount} unread]` : "";
+          const archived = c.archived ? " [archived]" : "";
+          return `${c.name} (${c.jid})${unread}${archived} — last message ${ts}`;
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${desktopChats.length} chat(s) [source: Desktop DB]:\n${lines.join("\n")}`,
+            },
+          ],
+        };
+      }
+
+      // Fall back to Baileys IPC store
+      const result: ChatsResult = await watcher.chats({ search, limit });
+      const { chats } = result;
+
+      if (chats.length === 0) {
+        const msg = search
+          ? `No chats found matching '${search}'.`
+          : "No chats available yet. The store may still be syncing — try again in a few seconds.";
+        return { content: [{ type: "text", text: msg }] };
+      }
+
+      const lines = chats.map((c) => {
+        const ts = c.lastMessageTimestamp
+          ? new Date(c.lastMessageTimestamp).toISOString()
+          : "unknown";
+        const unread = c.unreadCount > 0 ? ` [${c.unreadCount} unread]` : "";
+        return `${c.name} (${c.jid})${unread} — last message ${ts}`;
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${chats.length} chat(s) [source: Baileys store]:\n${lines.join("\n")}`,
+          },
+        ],
+      };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       return {
@@ -397,6 +571,91 @@ server.tool(
       const result = await watcher.login();
       return {
         content: [{ type: "text", text: result.message }],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_history
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_history",
+  [
+    "Fetch message history for a WhatsApp chat.",
+    "Reads directly from the WhatsApp Desktop macOS SQLite database when available — no phone connection required.",
+    "Falls back to Baileys on-demand fetch (requires phone online) when the Desktop DB is not present.",
+    "Accepts a full JID (e.g. '41796074745@s.whatsapp.net') or a phone number (e.g. '+41796074745').",
+  ].join(" "),
+  {
+    jid: z
+      .string()
+      .min(1)
+      .describe(
+        "The chat JID (e.g. '41796074745@s.whatsapp.net') or phone number (e.g. '+41796074745')"
+      ),
+    count: z
+      .number()
+      .min(1)
+      .max(500)
+      .default(50)
+      .describe("Number of messages to fetch (default 50, max 500)"),
+  },
+  async ({ jid, count }) => {
+    try {
+      // Try the Desktop DB first — works offline, no anchor message needed
+      const desktopMessages = getMessages(jid, count);
+
+      if (desktopMessages !== null) {
+        // Desktop DB is available
+        if (desktopMessages.length === 0) {
+          return {
+            content: [{ type: "text", text: `No messages found for ${jid} in the WhatsApp Desktop database.` }],
+          };
+        }
+
+        const lines = desktopMessages.map((m) => {
+          const direction = m.fromMe ? "Me" : (m.pushName ?? "Them");
+          return `[${m.date}] ${direction}: ${m.text}`;
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${desktopMessages.length} message(s) for ${jid} [source: Desktop DB]:\n${lines.join("\n")}`,
+            },
+          ],
+        };
+      }
+
+      // Fall back to Baileys IPC (on-demand fetch from phone)
+      const result: HistoryResult = await watcher.history({ jid, count });
+      const { messages } = result;
+
+      if (messages.length === 0) {
+        return { content: [{ type: "text", text: "No messages found for this chat." }] };
+      }
+
+      const lines = messages.map((m) => {
+        const direction = m.fromMe ? "Me" : "Them";
+        return `[${m.date}] ${direction}: ${m.text}`;
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${messages.length} message(s) for ${jid} [source: Baileys]:\n${lines.join("\n")}`,
+          },
+        ],
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);

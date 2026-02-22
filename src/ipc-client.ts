@@ -44,6 +44,7 @@ export interface StatusResult {
 
 export interface SendResult {
   preview: string;
+  targetJid?: string;
 }
 
 export interface ReceiveResult {
@@ -54,12 +55,48 @@ export interface WaitResult {
   messages: Array<{ body: string; timestamp: number }>;
 }
 
+export interface ContactEntry {
+  jid: string;
+  name: string | null;
+  phoneNumber: string;
+  lastSeen: number;
+}
+
+export interface ContactsResult {
+  contacts: ContactEntry[];
+}
+
 export interface LoginResult {
   message: string;
 }
 
 export interface RegisterResult {
   registered: boolean;
+}
+
+export interface ChatEntry {
+  jid: string;
+  name: string;
+  lastMessageTimestamp: number;
+  unreadCount: number;
+}
+
+export interface ChatsResult {
+  chats: ChatEntry[];
+}
+
+export interface HistoryMessage {
+  id: string | null;
+  fromMe: boolean;
+  timestamp: number;
+  date: string;
+  text: string;
+  type: string;
+}
+
+export interface HistoryResult {
+  messages: HistoryMessage[];
+  count: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,14 +136,34 @@ export class WatcherClient {
     return result as unknown as StatusResult;
   }
 
-  async send(message: string): Promise<SendResult> {
-    const result = await this.call("send", { message });
+  async send(message: string, recipient?: string): Promise<SendResult> {
+    const params: Record<string, unknown> = { message };
+    if (recipient !== undefined) params.recipient = recipient;
+    const result = await this.call("send", params);
     return result as unknown as SendResult;
   }
 
-  async receive(): Promise<ReceiveResult> {
-    const result = await this.call("receive", {});
+  async receive(from?: string): Promise<ReceiveResult> {
+    const params: Record<string, unknown> = {};
+    if (from !== undefined) params.from = from;
+    const result = await this.call("receive", params);
     return result as unknown as ReceiveResult;
+  }
+
+  async contacts(search?: string, limit?: number): Promise<ContactsResult> {
+    const params: Record<string, unknown> = {};
+    if (search !== undefined) params.search = search;
+    if (limit !== undefined) params.limit = limit;
+    const result = await this.call("contacts", params);
+    return result as unknown as ContactsResult;
+  }
+
+  async chats(params?: { search?: string; limit?: number }): Promise<ChatsResult> {
+    const ipcParams: Record<string, unknown> = {};
+    if (params?.search !== undefined) ipcParams.search = params.search;
+    if (params?.limit !== undefined) ipcParams.limit = params.limit;
+    const result = await this.call("chats", ipcParams);
+    return result as unknown as ChatsResult;
   }
 
   async wait(timeoutMs: number): Promise<WaitResult> {
@@ -117,6 +174,13 @@ export class WatcherClient {
   async login(): Promise<LoginResult> {
     const result = await this.call("login", {});
     return result as unknown as LoginResult;
+  }
+
+  async history(params: { jid: string; count?: number }): Promise<HistoryResult> {
+    const ipcParams: Record<string, unknown> = { jid: params.jid };
+    if (params.count !== undefined) ipcParams.count = params.count;
+    const result = await this.call("history", ipcParams);
+    return result as unknown as HistoryResult;
   }
 
   // -------------------------------------------------------------------------

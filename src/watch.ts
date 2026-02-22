@@ -36,7 +36,7 @@
  *   WHAZAA_AUTH_DIR  Override the auth credentials directory (default: ~/.whazaa/auth)
  */
 
-import { existsSync, unlinkSync, readFileSync } from "node:fs";
+import { existsSync, unlinkSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { spawnSync, execSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,10 +48,13 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
+  proto,
 } from "@whiskeysockets/baileys";
+import type { Chat, Contact } from "@whiskeysockets/baileys";
 import pino from "pino";
 import { resolveAuthDir, printQR } from "./auth.js";
 import { IPC_SOCKET_PATH } from "./ipc-client.js";
+import { listChats } from "./desktop-db.js";
 
 // ---------------------------------------------------------------------------
 // IPC protocol types (internal)
@@ -76,6 +79,13 @@ interface QueuedMessage {
   timestamp: number;
 }
 
+interface ContactEntry {
+  jid: string;
+  name: string | null;
+  phoneNumber: string;
+  lastSeen: number;
+}
+
 // ---------------------------------------------------------------------------
 // Session routing state
 // ---------------------------------------------------------------------------
@@ -91,6 +101,19 @@ const clientWaiters = new Map<
   string,
   Array<(msgs: QueuedMessage[]) => void>
 >();
+
+/**
+ * Per-JID incoming message queues for non-self-chat contacts.
+ * Key is the normalized JID (e.g. "41764502698@s.whatsapp.net").
+ * Self-chat messages are NOT stored here — they go to clientQueues.
+ */
+const contactMessageQueues = new Map<string, QueuedMessage[]>();
+
+/**
+ * Recently seen contacts, keyed by normalized JID.
+ * Updated whenever a message is received from or sent to any non-self JID.
+ */
+const contactDirectory = new Map<string, ContactEntry>();
 
 /**
  * Dispatch an incoming WhatsApp message to the active MCP client's queue
@@ -123,6 +146,113 @@ function dispatchIncomingMessage(body: string, timestamp: number): void {
 /** The active Baileys socket — null when disconnected */
 let watcherSock: ReturnType<typeof makeWASocket> | null = null;
 
+/**
+ * Lightweight chat store: populated by chats.upsert / chats.update / chats.delete events.
+ * Keyed by JID. WhatsApp pushes ~100-150 recent chats on connect with syncFullHistory:false.
+ */
+const chatStore = new Map<string, Chat>();
+
+/**
+ * Contact store: populated by contacts.upsert / contacts.update events.
+ * Keyed by JID (id field from Contact).
+ */
+const contactStore = new Map<string, Contact>();
+
+/**
+ * Message store: keyed by normalized JID, stores raw Baileys message objects.
+ * Used as anchor points for on-demand history fetches.
+ * Populated from messaging-history.set events, messages.upsert events, and sent messages.
+ */
+const messageStore = new Map<string, proto.IWebMessageInfo[]>();
+
+// ---------------------------------------------------------------------------
+// Chat/contact store persistence (survives watcher restarts)
+// ---------------------------------------------------------------------------
+
+const WHAZAA_DIR = join(homedir(), ".whazaa");
+const CHAT_CACHE_PATH = join(WHAZAA_DIR, "chat-cache.json");
+const CONTACT_CACHE_PATH = join(WHAZAA_DIR, "contact-cache.json");
+const MESSAGE_CACHE_PATH = join(WHAZAA_DIR, "message-cache.json");
+
+/**
+ * Load chatStore and contactStore from disk if cache files exist.
+ * Called once at startup before opening the socket.
+ */
+function loadStoreCache(): void {
+  try {
+    if (existsSync(CHAT_CACHE_PATH)) {
+      const raw = JSON.parse(readFileSync(CHAT_CACHE_PATH, "utf-8")) as Chat[];
+      for (const chat of raw) {
+        if (chat.id) chatStore.set(chat.id, chat);
+      }
+      process.stderr.write(
+        `[whazaa-watch] Loaded ${chatStore.size} chats from cache\n`
+      );
+    }
+  } catch {
+    // Corrupted cache — ignore, will be overwritten on next sync
+  }
+
+  try {
+    if (existsSync(CONTACT_CACHE_PATH)) {
+      const raw = JSON.parse(readFileSync(CONTACT_CACHE_PATH, "utf-8")) as Contact[];
+      for (const contact of raw) {
+        if (contact.id) contactStore.set(contact.id, contact);
+      }
+      process.stderr.write(
+        `[whazaa-watch] Loaded ${contactStore.size} contacts from cache\n`
+      );
+    }
+  } catch {
+    // Corrupted cache — ignore
+  }
+
+  try {
+    if (existsSync(MESSAGE_CACHE_PATH)) {
+      const raw = JSON.parse(readFileSync(MESSAGE_CACHE_PATH, "utf-8")) as Record<string, proto.IWebMessageInfo[]>;
+      let totalMsgs = 0;
+      for (const [jid, msgs] of Object.entries(raw)) {
+        if (Array.isArray(msgs) && msgs.length > 0) {
+          messageStore.set(jid, msgs);
+          totalMsgs += msgs.length;
+        }
+      }
+      process.stderr.write(
+        `[whazaa-watch] Loaded ${totalMsgs} messages across ${messageStore.size} JIDs from cache\n`
+      );
+    }
+  } catch {
+    // Corrupted cache — ignore, will be overwritten on next sync
+  }
+}
+
+/**
+ * Persist chatStore and contactStore to disk.
+ * Called after each history sync event so restarts recover state quickly.
+ */
+function saveStoreCache(): void {
+  try {
+    mkdirSync(WHAZAA_DIR, { recursive: true });
+    writeFileSync(CHAT_CACHE_PATH, JSON.stringify(Array.from(chatStore.values())), "utf-8");
+    writeFileSync(CONTACT_CACHE_PATH, JSON.stringify(Array.from(contactStore.values())), "utf-8");
+
+    // Serialize messageStore: only save essential fields to keep file small
+    const msgObj: Record<string, Array<{ key: proto.IMessageKey; messageTimestamp: number | null; message: proto.IMessage | null | undefined }>> = {};
+    for (const [jid, msgs] of messageStore) {
+      msgObj[jid] = msgs.map((m) => ({
+        key: m.key ?? {},
+        messageTimestamp: m.messageTimestamp != null
+          ? (typeof m.messageTimestamp === "number" ? m.messageTimestamp : Number(m.messageTimestamp))
+          : null,
+        message: m.message ?? null,
+      }));
+    }
+    writeFileSync(MESSAGE_CACHE_PATH, JSON.stringify(msgObj), "utf-8");
+  } catch (err) {
+    process.stderr.write(`[whazaa-watch] Failed to save store cache: ${err}\n`);
+  }
+}
+
 /** Current watcher connection state */
 let watcherStatus = {
   connected: false,
@@ -134,6 +264,98 @@ let watcherStatus = {
 
 /** IDs of messages sent by this watcher — used to suppress self-echo */
 const sentMessageIds = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// Contact and JID helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a human-readable phone number or JID to a normalized WhatsApp JID.
+ *
+ * Handles:
+ *   "+41764502698"         -> "41764502698@s.whatsapp.net"
+ *   "41764502698"          -> "41764502698@s.whatsapp.net"
+ *   "41764502698@s.whatsapp.net" -> "41764502698@s.whatsapp.net" (pass-through)
+ *   "123456789@g.us"       -> "123456789@g.us" (group, pass-through)
+ */
+function resolveJid(recipient: string): string {
+  const trimmed = recipient.trim();
+
+  // Already a full JID
+  if (trimmed.includes("@")) {
+    return trimmed;
+  }
+
+  // Strip leading + and any spaces/dashes from phone numbers
+  const digits = trimmed.replace(/^\+/, "").replace(/[\s\-().]/g, "");
+  return `${digits}@s.whatsapp.net`;
+}
+
+/**
+ * Try to resolve a contact name to a JID by searching the contactDirectory.
+ * Returns the JID if found, or null.
+ */
+function resolveNameToJid(name: string): string | null {
+  const lowerName = name.toLowerCase();
+  for (const entry of contactDirectory.values()) {
+    if (entry.name && entry.name.toLowerCase().includes(lowerName)) {
+      return entry.jid;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve a recipient string to a JID.
+ * Tries name lookup first if the string doesn't look like a phone number or JID.
+ */
+function resolveRecipient(recipient: string): string {
+  const trimmed = recipient.trim();
+
+  // Looks like a phone number (starts with +, or is all digits/spaces/dashes)
+  // or is already a JID
+  if (trimmed.includes("@") || /^[\+\d][\d\s\-().]+$/.test(trimmed)) {
+    return resolveJid(trimmed);
+  }
+
+  // Try name lookup
+  const nameJid = resolveNameToJid(trimmed);
+  if (nameJid) {
+    return nameJid;
+  }
+
+  // Fall back to treating it as a phone number
+  return resolveJid(trimmed);
+}
+
+/**
+ * Record a contact entry in the directory.
+ */
+function trackContact(jid: string, name: string | null, timestamp: number): void {
+  const existing = contactDirectory.get(jid);
+  if (!existing || timestamp > existing.lastSeen) {
+    const phoneNumber = jid.split("@")[0];
+    contactDirectory.set(jid, {
+      jid,
+      name: name ?? existing?.name ?? null,
+      phoneNumber,
+      lastSeen: timestamp,
+    });
+  } else if (name && !existing.name) {
+    // Update name if we now have one
+    existing.name = name;
+  }
+}
+
+/**
+ * Store a message in the per-JID contact queue.
+ */
+function enqueueContactMessage(jid: string, body: string, timestamp: number): void {
+  if (!contactMessageQueues.has(jid)) {
+    contactMessageQueues.set(jid, []);
+  }
+  contactMessageQueues.get(jid)!.push({ body, timestamp });
+}
 
 /**
  * Convert common Markdown syntax to WhatsApp formatting codes.
@@ -152,8 +374,11 @@ function markdownToWhatsApp(text: string): string {
 /**
  * Send a message via the watcher's Baileys socket.
  * Called from the IPC 'send' handler.
+ *
+ * @param message  The message text (Markdown supported)
+ * @param recipient  Optional JID or phone number. Defaults to self-chat.
  */
-async function watcherSendMessage(message: string): Promise<string> {
+async function watcherSendMessage(message: string, recipient?: string): Promise<string> {
   if (!watcherSock) {
     throw new Error("WhatsApp socket not initialized. Is the watcher connected?");
   }
@@ -164,13 +389,19 @@ async function watcherSendMessage(message: string): Promise<string> {
     throw new Error("Self JID not yet known. Wait for connection to fully open.");
   }
 
+  const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
   const text = markdownToWhatsApp(message);
-  const result = await watcherSock.sendMessage(watcherStatus.selfJid, { text });
+  const result = await watcherSock.sendMessage(targetJid, { text });
 
   if (result?.key?.id) {
     const id = result.key.id;
     sentMessageIds.add(id);
     setTimeout(() => sentMessageIds.delete(id), 30_000);
+  }
+
+  // Track outbound contact (non-self only)
+  if (targetJid !== watcherStatus.selfJid) {
+    trackContact(targetJid, null, Date.now());
   }
 
   const preview = message.length > 80 ? `${message.slice(0, 80)}...` : message;
@@ -293,6 +524,8 @@ async function handleRequest(
         break;
       }
 
+      const recipient = params.recipient != null ? String(params.recipient) : undefined;
+
       // Mark this session as the active client
       activeClientId = sessionId;
       if (!clientQueues.has(sessionId)) {
@@ -300,8 +533,9 @@ async function handleRequest(
       }
 
       try {
-        const preview = await watcherSendMessage(message);
-        sendResponse(socket, { id, ok: true, result: { preview } });
+        const preview = await watcherSendMessage(message, recipient);
+        const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+        sendResponse(socket, { id, ok: true, result: { preview, targetJid } });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         sendResponse(socket, { id, ok: false, error: msg });
@@ -311,9 +545,33 @@ async function handleRequest(
     }
 
     case "receive": {
-      const queue = clientQueues.get(sessionId) ?? [];
-      const messages = queue.splice(0);
-      sendResponse(socket, { id, ok: true, result: { messages } });
+      const fromParam = params.from != null ? String(params.from) : undefined;
+
+      if (!fromParam) {
+        // Default: drain this session's self-chat queue (backwards compatible)
+        const queue = clientQueues.get(sessionId) ?? [];
+        const messages = queue.splice(0);
+        sendResponse(socket, { id, ok: true, result: { messages } });
+      } else if (fromParam === "all") {
+        // Collect from all contact queues AND the self-chat queue
+        const combined: QueuedMessage[] = [];
+        const selfQueue = clientQueues.get(sessionId) ?? [];
+        combined.push(...selfQueue.splice(0));
+        for (const [contactJid, q] of contactMessageQueues) {
+          const msgs = q.splice(0);
+          for (const m of msgs) {
+            combined.push({ body: `[${contactJid}] ${m.body}`, timestamp: m.timestamp });
+          }
+        }
+        combined.sort((a, b) => a.timestamp - b.timestamp);
+        sendResponse(socket, { id, ok: true, result: { messages: combined } });
+      } else {
+        // Specific contact: resolve their JID and drain their queue
+        const targetJid = resolveRecipient(fromParam);
+        const q = contactMessageQueues.get(targetJid) ?? [];
+        const messages = q.splice(0);
+        sendResponse(socket, { id, ok: true, result: { messages } });
+      }
       socket.end();
       break;
     }
@@ -388,6 +646,252 @@ async function handleRequest(
           message:
             "QR pairing initiated. Check the terminal where the watcher is running and scan the QR code with WhatsApp (Linked Devices -> Link a Device).",
         },
+      });
+      socket.end();
+      break;
+    }
+
+    case "contacts": {
+      const searchParam = params.search != null ? String(params.search).toLowerCase() : null;
+      const limitParam = params.limit != null ? Number(params.limit) : 50;
+
+      // Merge contactDirectory (session-seen) with contactStore (WhatsApp sync)
+      const merged = new Map<string, ContactEntry>(contactDirectory);
+
+      for (const [jid, storeContact] of contactStore) {
+        if (!merged.has(jid)) {
+          const phoneNumber = jid.split("@")[0];
+          merged.set(jid, {
+            jid,
+            name: storeContact.name ?? storeContact.notify ?? null,
+            phoneNumber,
+            lastSeen: 0,
+          });
+        } else {
+          // Enrich existing entry with name from store if we didn't have one
+          const existing = merged.get(jid)!;
+          if (!existing.name) {
+            existing.name = storeContact.name ?? storeContact.notify ?? null;
+          }
+        }
+      }
+
+      // Sort by lastSeen descending (most recent first), store-only contacts go to end
+      const allContacts = Array.from(merged.values())
+        .sort((a, b) => b.lastSeen - a.lastSeen);
+
+      const filtered = searchParam
+        ? allContacts.filter(
+            (c) =>
+              c.phoneNumber.includes(searchParam) ||
+              (c.name && c.name.toLowerCase().includes(searchParam))
+          )
+        : allContacts;
+
+      const contacts = filtered.slice(0, limitParam).map((c) => ({
+        jid: c.jid,
+        name: c.name,
+        phoneNumber: c.phoneNumber,
+        lastSeen: c.lastSeen,
+      }));
+
+      sendResponse(socket, { id, ok: true, result: { contacts } });
+      socket.end();
+      break;
+    }
+
+    case "chats": {
+      const searchParam = params.search != null ? String(params.search).toLowerCase() : null;
+      const limitParam = params.limit != null ? Number(params.limit) : 50;
+
+      // Try the Desktop DB first — it has the complete inbox
+      const desktopChats = listChats(searchParam ?? undefined, limitParam);
+
+      if (desktopChats !== null) {
+        // Desktop DB available: build entries from it, prefer Desktop DB names over chatStore
+        const chats = desktopChats.map((dc) => {
+          // Enrich with Baileys chatStore name if Desktop DB has none
+          const storeChat = chatStore.get(dc.jid);
+          const storeContact = contactStore.get(dc.jid);
+          const name = dc.name || (storeChat as { name?: string } | undefined)?.name || storeContact?.name || storeContact?.notify || dc.jid.split("@")[0];
+          const lastMessageTimestamp = dc.lastMessageDate
+            ? new Date(dc.lastMessageDate).getTime()
+            : 0;
+          return {
+            jid: dc.jid,
+            name,
+            lastMessageTimestamp,
+            unreadCount: dc.unreadCount,
+          };
+        });
+
+        sendResponse(socket, { id, ok: true, result: { chats } });
+        socket.end();
+        break;
+      }
+
+      // Fall back to Baileys chatStore
+      const chatEntries = Array.from(chatStore.values()).map((chat) => {
+        const jid = chat.id ?? "";
+        // Resolve display name: chat name > contact store name > push name > phone number portion of JID
+        const storeContact = contactStore.get(jid);
+        const name =
+          (chat as { name?: string }).name ??
+          storeContact?.name ??
+          storeContact?.notify ??
+          jid.split("@")[0];
+
+        return {
+          jid,
+          name,
+          lastMessageTimestamp: chat.conversationTimestamp
+            ? Number(chat.conversationTimestamp) * 1_000
+            : 0,
+          unreadCount: (chat.unreadCount ?? 0) as number,
+        };
+      }).sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
+
+      const filtered = searchParam
+        ? chatEntries.filter(
+            (c) =>
+              c.jid.includes(searchParam) ||
+              c.name.toLowerCase().includes(searchParam)
+          )
+        : chatEntries;
+
+      const chats = filtered.slice(0, limitParam);
+
+      sendResponse(socket, { id, ok: true, result: { chats } });
+      socket.end();
+      break;
+    }
+
+    case "history": {
+      const jid = params.jid != null ? String(params.jid) : null;
+      if (!jid) {
+        sendResponse(socket, { id, ok: false, error: "jid is required" });
+        socket.end();
+        break;
+      }
+      const count = params.count != null ? Number(params.count) : 50;
+
+      if (!watcherSock) {
+        sendResponse(socket, { id, ok: false, error: "Not connected" });
+        socket.end();
+        break;
+      }
+
+      // Normalize the JID (phone number like "+41796074745" -> "41796074745@s.whatsapp.net")
+      const normalizedJid = resolveJid(jid);
+
+      // Check if we have any stored messages for this JID to use as anchor
+      const stored = messageStore.get(normalizedJid) ?? [];
+
+      if (stored.length === 0) {
+        sendResponse(socket, {
+          id,
+          ok: false,
+          error: "No anchor message found for this chat. Send or receive a message first to create an anchor.",
+        });
+        socket.end();
+        break;
+      }
+
+      // Find the oldest message we have as anchor
+      const oldest = stored.reduce((a, b) => {
+        const tsA = typeof a.messageTimestamp === "number" ? a.messageTimestamp : Number(a.messageTimestamp);
+        const tsB = typeof b.messageTimestamp === "number" ? b.messageTimestamp : Number(b.messageTimestamp);
+        return tsA < tsB ? a : b;
+      });
+
+      // Set up a one-time listener for the on-demand history response
+      const historyPromise = new Promise<proto.IWebMessageInfo[]>((resolve) => {
+        const timeout = setTimeout(() => {
+          // Timed out — return what we have locally
+          resolve(messageStore.get(normalizedJid) ?? stored);
+        }, 15_000);
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const handler = (event: any) => {
+          const { HistorySyncType } = proto.HistorySync;
+          if (event.syncType === HistorySyncType.ON_DEMAND) {
+            clearTimeout(timeout);
+            watcherSock!.ev.off("messaging-history.set", handler);
+
+            // Filter messages for our JID and merge into store
+            const histMsgs: proto.IWebMessageInfo[] = event.messages ?? [];
+            const forChat = histMsgs.filter((m) => m.key?.remoteJid === normalizedJid);
+            const arr = messageStore.get(normalizedJid) ?? [];
+            for (const msg of forChat) {
+              if (!arr.some((m) => m.key?.id === msg.key?.id)) {
+                arr.push(msg);
+              }
+            }
+            messageStore.set(normalizedJid, arr);
+            saveStoreCache();
+            resolve(arr);
+          }
+        };
+        watcherSock!.ev.on("messaging-history.set", handler);
+      });
+
+      // Request history from the phone
+      try {
+        const oldestTsSec = typeof oldest.messageTimestamp === "number"
+          ? oldest.messageTimestamp
+          : Number(oldest.messageTimestamp);
+        // Baileys' oldestMsgTimestampMs field expects milliseconds
+        const oldestTsMs = oldestTsSec < 1e12 ? oldestTsSec * 1000 : oldestTsSec;
+        await watcherSock.fetchMessageHistory(count, oldest.key!, oldestTsMs);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendResponse(socket, { id, ok: false, error: `fetchMessageHistory failed: ${msg}` });
+        socket.end();
+        break;
+      }
+
+      // Wait for on-demand response (or timeout fallback)
+      const allMessages = await historyPromise;
+
+      // Format messages for output
+      const formatted = allMessages
+        .sort((a, b) => {
+          const tsA = typeof a.messageTimestamp === "number" ? a.messageTimestamp : Number(a.messageTimestamp);
+          const tsB = typeof b.messageTimestamp === "number" ? b.messageTimestamp : Number(b.messageTimestamp);
+          return tsA - tsB;
+        })
+        .map((m) => {
+          const ts = typeof m.messageTimestamp === "number" ? m.messageTimestamp : Number(m.messageTimestamp);
+          return {
+            id: m.key?.id ?? null,
+            fromMe: m.key?.fromMe ?? false,
+            timestamp: ts,
+            date: new Date(ts * 1_000).toISOString(),
+            text:
+              m.message?.conversation ??
+              m.message?.extendedTextMessage?.text ??
+              m.message?.imageMessage?.caption ??
+              "[non-text message]",
+            type: m.message?.conversation
+              ? "text"
+              : m.message?.extendedTextMessage
+              ? "text"
+              : m.message?.imageMessage
+              ? "image"
+              : m.message?.videoMessage
+              ? "video"
+              : m.message?.audioMessage
+              ? "audio"
+              : m.message?.documentMessage
+              ? "document"
+              : "other",
+          };
+        });
+
+      sendResponse(socket, {
+        id,
+        ok: true,
+        result: { messages: formatted as unknown as Record<string, unknown>[], count: formatted.length },
       });
       socket.end();
       break;
@@ -859,6 +1363,9 @@ async function connectWatcher(
   const logger = pino({ level: "silent" });
   const authDir = resolveAuthDir();
 
+  // Load persisted chat/contact store so data survives watcher restarts
+  loadStoreCache();
+
   const connStatus: WatcherConnStatus = {
     connected: false,
     phoneNumber: null,
@@ -912,10 +1419,112 @@ async function connectWatcher(
       syncFullHistory: false,
       markOnlineOnConnect: false,
       logger,
+      // Accept RECENT, PUSH_NAME, INITIAL_BOOTSTRAP, and ON_DEMAND history so
+      // chatStore and contactStore populate on connect, and on-demand history
+      // fetches (fetchMessageHistory) receive their responses.
+      shouldSyncHistoryMessage: (msg) => {
+        const t = msg.syncType;
+        const { HistorySyncType } = proto.HistorySync;
+        return (
+          t === HistorySyncType.RECENT ||
+          t === HistorySyncType.PUSH_NAME ||
+          t === HistorySyncType.INITIAL_BOOTSTRAP ||
+          t === HistorySyncType.ON_DEMAND
+        );
+      },
     });
 
     // Expose socket and status to module scope for IPC handlers
     watcherSock = sock;
+
+    // --- Populate chatStore and contactStore from initial history sync -------
+    sock.ev.on("messaging-history.set", ({ chats, contacts, messages, syncType }) => {
+      for (const chat of chats) {
+        if (chat.id) {
+          chatStore.set(chat.id, chat);
+        }
+      }
+      for (const contact of contacts) {
+        if (contact.id) {
+          contactStore.set(contact.id, contact);
+        }
+      }
+
+      // Store messages in messageStore keyed by JID (used as history anchors)
+      if (messages && messages.length > 0) {
+        for (const msg of messages) {
+          const jid = msg.key?.remoteJid;
+          if (!jid) continue;
+          if (!messageStore.has(jid)) messageStore.set(jid, []);
+          const arr = messageStore.get(jid)!;
+          if (!arr.some((m) => m.key?.id === msg.key?.id)) {
+            arr.push(msg);
+          }
+        }
+        process.stderr.write(
+          `[whazaa-watch] messaging-history.set: stored ${messages.length} messages across ${messageStore.size} JIDs (syncType=${syncType})\n`
+        );
+      }
+
+      process.stderr.write(
+        `[whazaa-watch] messaging-history.set: ${chats.length} chats, ${contacts.length} contacts — store: ${chatStore.size} chats, ${contactStore.size} contacts\n`
+      );
+      saveStoreCache();
+    });
+
+    // --- Populate chatStore from WhatsApp sync events -----------------------
+    sock.ev.on("chats.upsert", (chats) => {
+      for (const chat of chats) {
+        if (chat.id) {
+          chatStore.set(chat.id, chat);
+        }
+      }
+      process.stderr.write(
+        `[whazaa-watch] chats.upsert: ${chats.length} chats — store now has ${chatStore.size}\n`
+      );
+      saveStoreCache();
+    });
+
+    sock.ev.on("chats.update", (updates) => {
+      for (const update of updates) {
+        if (!update.id) continue;
+        const existing = chatStore.get(update.id);
+        if (existing) {
+          Object.assign(existing, update);
+        } else {
+          // Received update for a chat we haven't seen yet — store it as-is
+          chatStore.set(update.id, update as Chat);
+        }
+      }
+    });
+
+    sock.ev.on("chats.delete", (jids) => {
+      for (const jid of jids) {
+        chatStore.delete(jid);
+      }
+    });
+
+    // --- Populate contactStore from WhatsApp sync events --------------------
+    sock.ev.on("contacts.upsert", (contacts) => {
+      for (const contact of contacts) {
+        if (contact.id) {
+          contactStore.set(contact.id, contact);
+        }
+      }
+      saveStoreCache();
+    });
+
+    sock.ev.on("contacts.update", (updates) => {
+      for (const update of updates) {
+        if (!update.id) continue;
+        const existing = contactStore.get(update.id);
+        if (existing) {
+          Object.assign(existing, update);
+        } else {
+          contactStore.set(update.id, update as Contact);
+        }
+      }
+    });
 
     sock.ev.on("creds.update", saveCreds);
 
@@ -984,6 +1593,19 @@ async function connectWatcher(
 
       for (const msg of messages) {
         const remoteJid = msg.key?.remoteJid;
+
+        // Store all messages in messageStore regardless of body content
+        // (needed as history anchors for fetchMessageHistory)
+        if (remoteJid) {
+          const jidNorm = stripDevice(remoteJid);
+          if (!messageStore.has(jidNorm)) messageStore.set(jidNorm, []);
+          const arr = messageStore.get(jidNorm)!;
+          if (!arr.some((m) => m.key?.id === msg.key?.id)) {
+            arr.push(msg);
+            saveStoreCache();
+          }
+        }
+
         const body =
           msg.message?.conversation ??
           msg.message?.extendedTextMessage?.text ??
@@ -997,9 +1619,8 @@ async function connectWatcher(
           (selfLid && remoteJidNorm === selfLid) ||
           (connStatus.phoneNumber && remoteJid.startsWith(connStatus.phoneNumber));
 
-        if (!isSelfChat) continue;
-
         const msgId = msg.key?.id ?? randomUUID();
+        const timestamp = Number(msg.messageTimestamp) * 1_000;
 
         // Skip self-echo (messages sent by this watcher process)
         if (msgId && sentMessageIds.has(msgId)) {
@@ -1007,8 +1628,22 @@ async function connectWatcher(
           continue;
         }
 
-        const timestamp = Number(msg.messageTimestamp) * 1_000;
-        onMessage(body, msgId, timestamp);
+        if (isSelfChat) {
+          // Existing behaviour: deliver to iTerm2 and MCP client queue
+          onMessage(body, msgId, timestamp);
+        } else {
+          // Non-self-chat message: store in per-contact queue and update directory
+          const senderName =
+            (msg.pushName ?? null) ||
+            (msg.key?.participant
+              ? null
+              : null);
+          trackContact(remoteJidNorm, senderName, timestamp);
+          enqueueContactMessage(remoteJidNorm, body, timestamp);
+          process.stderr.write(
+            `[whazaa-watch] Incoming from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${body.slice(0, 60)}\n`
+          );
+        }
       }
     });
   }
