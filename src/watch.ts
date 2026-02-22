@@ -36,9 +36,10 @@
  *   WHAZAA_AUTH_DIR  Override the auth credentials directory (default: ~/.whazaa/auth)
  */
 
-import { existsSync, unlinkSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { existsSync, unlinkSync, readFileSync } from "node:fs";
+import { spawnSync, execSync } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, Socket, Server } from "node:net";
 import { randomUUID } from "node:crypto";
 
@@ -768,6 +769,71 @@ end tell`;
   return sessions;
 }
 
+/**
+ * Handle a /ss or /screenshot command received via WhatsApp.
+ * Captures the frontmost iTerm2 window and sends it back as an image.
+ */
+async function handleScreenshot(): Promise<void> {
+  // Ack immediately so the user knows we're working on it
+  await watcherSendMessage("Capturing screenshot...").catch(() => {});
+
+  const filePath = join(tmpdir(), `whazaa-screenshot-${Date.now()}.png`);
+
+  try {
+    // Get the window ID of the frontmost iTerm2 window
+    let windowId: string;
+    try {
+      windowId = execSync(
+        'osascript -e \'tell application "iTerm2" to id of window 1\'',
+        { timeout: 10_000 }
+      ).toString().trim();
+    } catch {
+      await watcherSendMessage("Error: iTerm2 is not running or has no open windows.").catch(() => {});
+      return;
+    }
+
+    if (!windowId) {
+      await watcherSendMessage("Error: Could not get iTerm2 window ID.").catch(() => {});
+      return;
+    }
+
+    // Capture the window: -x (no shutter sound), -o (no shadow), -l (window by ID)
+    execSync(`screencapture -x -o -l ${windowId} "${filePath}"`, { timeout: 15_000 });
+
+    const buffer = readFileSync(filePath);
+
+    if (!watcherSock) {
+      throw new Error("WhatsApp socket not initialized.");
+    }
+    if (!watcherStatus.selfJid) {
+      throw new Error("Self JID not yet known.");
+    }
+
+    const result = await watcherSock.sendMessage(watcherStatus.selfJid, {
+      image: buffer,
+      caption: "Screenshot",
+    });
+
+    if (result?.key?.id) {
+      const id = result.key.id;
+      sentMessageIds.add(id);
+      setTimeout(() => sentMessageIds.delete(id), 30_000);
+    }
+
+    process.stderr.write("[whazaa-watch] /ss: screenshot sent successfully\n");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[whazaa-watch] /ss: error — ${msg}\n`);
+    await watcherSendMessage(`Error taking screenshot: ${msg}`).catch(() => {});
+  } finally {
+    try {
+      unlinkSync(filePath);
+    } catch {
+      // File may not exist if capture failed before writing — ignore
+    }
+  }
+}
+
 // --- WhatsApp watcher connection ---------------------------------------------
 
 interface WatcherConnStatus {
@@ -1120,6 +1186,14 @@ end tell`;
       } else {
         watcherSendMessage("Session not found — it may have closed.").catch(() => {});
       }
+      return;
+    }
+
+    // --- /ss, /screenshot — capture and send iTerm2 window screenshot ---------
+    if (trimmedText === "/ss" || trimmedText === "/screenshot") {
+      handleScreenshot().catch((err) => {
+        process.stderr.write(`[whazaa-watch] /ss: unhandled error — ${err}\n`);
+      });
       return;
     }
 
