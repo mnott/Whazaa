@@ -2083,11 +2083,12 @@ async function connectWatcher(
             if (sockRef) {
               downloadImageToTemp(msg, sockRef).then((filePath) => {
                 if (!filePath) return;
-                // Deliver image path first, then caption (if any) as a second line
-                const deliveryText = caption
-                  ? `${filePath}\n${caption}`
-                  : filePath;
-                onMessage(deliveryText, msgId, timestamp);
+                // Deliver image path first, then caption as a separate message
+                if (caption) {
+                  onMessage(`${filePath} ${caption}`, msgId, timestamp);
+                } else {
+                  onMessage(filePath, msgId, timestamp);
+                }
               }).catch((err) => {
                 process.stderr.write(`[whazaa-watch] Image delivery error: ${err}\n`);
               });
