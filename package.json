@@ -32,7 +32,7 @@
   "author": "Matthias Nott",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mnott/Whazaa"
+    "url": "git+https://github.com/mnott/Whazaa.git"
   },
   "engines": {
     "node": ">=18.0.0"
