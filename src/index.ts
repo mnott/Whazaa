@@ -40,7 +40,7 @@ import {
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 import { watch } from "./watch.js";
-import { WatcherClient, ChatsResult, HistoryResult, TtsResult, VoiceConfigResult } from "./ipc-client.js";
+import { WatcherClient, ChatsResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult } from "./ipc-client.js";
 import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
@@ -780,16 +780,21 @@ server.tool(
       .boolean()
       .optional()
       .describe("Enable/disable voice mode. When true, PAI should respond with voice notes."),
+    localMode: z
+      .boolean()
+      .optional()
+      .describe("Enable/disable local speaker mode. When true AND voiceMode is true, PAI should use whatsapp_speak (local speakers) instead of whatsapp_tts (WhatsApp voice notes)."),
     personas: z
       .record(z.string())
       .optional()
       .describe("Map of persona names to voice IDs (e.g. {\"Nicole\": \"af_nicole\"})"),
   },
-  async ({ action, defaultVoice, voiceMode, personas }) => {
+  async ({ action, defaultVoice, voiceMode, localMode, personas }) => {
     try {
       const updates: Record<string, unknown> = {};
       if (defaultVoice !== undefined) updates.defaultVoice = defaultVoice;
       if (voiceMode !== undefined) updates.voiceMode = voiceMode;
+      if (localMode !== undefined) updates.localMode = localMode;
       if (personas !== undefined) updates.personas = personas;
 
       const result: VoiceConfigResult = await watcher.voiceConfig(action, Object.keys(updates).length > 0 ? updates : undefined);
@@ -803,13 +808,65 @@ server.tool(
         .map(([name, voice]) => `  ${name} -> ${voice}`)
         .join("\n");
 
+      const modeDesc = !c.voiceMode
+        ? "OFF (text)"
+        : c.localMode
+        ? "ON (local speakers)"
+        : "ON (WhatsApp voice notes)";
+
       return {
         content: [
           {
             type: "text",
-            text: `Voice config:\n  Mode: ${c.voiceMode ? "ON (voice notes)" : "OFF (text)"}\n  Default voice: ${c.defaultVoice}\n  Personas:\n${personaList}`,
+            text: `Voice config:\n  Mode: ${modeDesc}\n  Local mode: ${c.localMode ? "ON" : "OFF"}\n  Default voice: ${c.defaultVoice}\n  Personas:\n${personaList}`,
           },
         ],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_speak
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_speak",
+  [
+    "Speak text aloud through the Mac's speakers using Kokoro TTS.",
+    "100% local, no internet required. Same voices as whatsapp_tts.",
+    "Audio plays in the background without blocking other operations.",
+    "Use this when the user wants to hear responses locally instead of via WhatsApp voice notes.",
+    `Available voices: ${listVoices().join(", ")}.`,
+  ].join(" "),
+  {
+    message: z
+      .string()
+      .min(1)
+      .describe("The text to speak aloud"),
+    voice: z
+      .string()
+      .optional()
+      .default("bm_fable")
+      .describe("Kokoro voice to use (default: 'bm_fable'). Examples: 'af_bella', 'af_nova', 'bm_george', 'bm_daniel', 'bf_emma'."),
+  },
+  async ({ message, voice }) => {
+    try {
+      const result: SpeakResult = await watcher.speak(message, voice);
+      if (!result.success) {
+        return {
+          content: [{ type: "text", text: `Error: ${result.error}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `Speaking aloud (voice: ${result.voice})` }],
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
