@@ -1,6 +1,6 @@
 {
   "name": "whazaa",
-  "version": "0.6.11",
+  "version": "0.6.12",
   "description": "WhatsApp MCP server for Claude Code — talk to Claude from your phone via WhatsApp self-chat",
   "type": "module",
   "main": "dist/index.js",
