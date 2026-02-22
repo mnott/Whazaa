@@ -1634,11 +1634,11 @@ async function handleScreenshot(): Promise<void> {
       const itermSessionId = activeEntry?.itermSessionId ?? (activeItermSessionId || undefined);
 
       if (itermSessionId) {
-        // Walk windows → tabs → sessions to find the one with this session UUID.
-        // CRITICAL: also bring the matching tab to front BEFORE capturing —
-        // otherwise all tabs in the same window return the same window ID and
-        // screencapture always shows whichever tab is currently visible.
-        const script = `tell application "iTerm2"
+        // Step 1: Select the tab, bring the window to front, activate iTerm2.
+        // IMPORTANT: NO delay inside the AppleScript — a delay inside a
+        // `tell application` block can hold an Apple Events transaction open
+        // and prevent iTerm2 from processing its render queue.
+        const switchScript = `tell application "iTerm2"
   repeat with w in windows
     set tabCount to count of tabs of w
     repeat with tabIdx from 1 to tabCount
@@ -1646,7 +1646,35 @@ async function handleScreenshot(): Promise<void> {
       repeat with s in sessions of t
         if id of s is "${itermSessionId}" then
           select t
-          delay 0.3
+          set frontmost of w to true
+          activate
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`;
+        const switchResult = runAppleScript(switchScript);
+        if (!switchResult || switchResult !== "ok") {
+          // Session UUID not found — fall back to window 1
+          windowId = execSync(
+            'osascript -e \'tell application "iTerm2" to id of window 1\'',
+            { timeout: 10_000 }
+          ).toString().trim();
+          process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
+        } else {
+          // Step 2: Wait for iTerm2 to render the newly-visible tab.
+          // This delay is in Node.js, NOT inside an Apple Events transaction,
+          // so iTerm2's render loop is free to composite the new tab content.
+          await new Promise((r) => setTimeout(r, 1500));
+
+          // Step 3: Get the window ID in a separate AppleScript call.
+          const idScript = `tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if id of s is "${itermSessionId}" then
           return id of w
         end if
       end repeat
@@ -1654,17 +1682,17 @@ async function handleScreenshot(): Promise<void> {
   end repeat
   return ""
 end tell`;
-        const found = runAppleScript(script);
-        if (found && found !== "") {
-          windowId = found;
-          process.stderr.write(`[whazaa-watch] /ss: using window ${windowId} (from iTerm session ${itermSessionId})\n`);
-        } else {
-          // Session UUID not found in any window — fall back to window 1
-          windowId = execSync(
-            'osascript -e \'tell application "iTerm2" to id of window 1\'',
-            { timeout: 10_000 }
-          ).toString().trim();
-          process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
+          const found = runAppleScript(idScript);
+          if (found && found !== "") {
+            windowId = found;
+            process.stderr.write(`[whazaa-watch] /ss: using window ${windowId} (from iTerm session ${itermSessionId})\n`);
+          } else {
+            windowId = execSync(
+              'osascript -e \'tell application "iTerm2" to id of window 1\'',
+              { timeout: 10_000 }
+            ).toString().trim();
+            process.stderr.write(`[whazaa-watch] /ss: session vanished after switch, falling back to window 1 (id=${windowId})\n`);
+          }
         }
       } else {
         // No active session known — fall back to window 1
@@ -1683,9 +1711,6 @@ end tell`;
       await watcherSendMessage("Error: Could not get iTerm2 window ID.").catch(() => {});
       return;
     }
-
-    // Tab-switch delay is now inside the AppleScript (delay 0.5) to ensure
-    // the window buffer is updated before screencapture reads it.
 
     // Capture the window: -x (no shutter sound), -o (no shadow), -l (window by ID)
     execSync(`screencapture -x -o -l ${windowId} "${filePath}"`, { timeout: 15_000 });
@@ -1722,6 +1747,101 @@ end tell`;
       // File may not exist if capture failed before writing — ignore
     }
   }
+}
+
+/**
+ * Handle /kill N — kill a stuck Claude process and restart it in the same directory.
+ * Finds the Claude PID via the session's TTY, sends SIGTERM, waits for shell prompt,
+ * then types `claude` to restart.
+ */
+async function handleKillSession(
+  target: { id: string; name: string; path: string }
+): Promise<void> {
+  await watcherSendMessage(`Killing Claude in session "${target.name}"...`).catch(() => {});
+  process.stderr.write(`[whazaa-watch] /kill: targeting session ${target.id} ("${target.name}")\n`);
+
+  // Get the TTY of the target session
+  const ttyScript = `
+tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${target.id}" then
+          return tty of aSession
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`;
+
+  const tty = runAppleScript(ttyScript);
+  if (!tty) {
+    await watcherSendMessage("Error: Could not find session TTY.").catch(() => {});
+    return;
+  }
+
+  // Find the Claude PID on this TTY
+  const ttyShort = tty.replace("/dev/", "");
+  const psResult = spawnSync("ps", ["-eo", "pid,tty,comm"], { timeout: 5000 });
+  if (psResult.status !== 0) {
+    await watcherSendMessage("Error: Could not list processes.").catch(() => {});
+    return;
+  }
+
+  let claudePid: string | null = null;
+  const psLines = psResult.stdout.toString().split("\n");
+  for (const line of psLines) {
+    const trimmed = line.trim();
+    if (trimmed.includes(ttyShort) && trimmed.includes("claude")) {
+      claudePid = trimmed.split(/\s+/)[0];
+      break;
+    }
+  }
+
+  if (!claudePid) {
+    // No Claude process found — might already be at shell prompt
+    await watcherSendMessage("No Claude process found in that session. Restarting...").catch(() => {});
+    typeIntoSession(target.id, "claude");
+    await watcherSendMessage("Restarted Claude.").catch(() => {});
+    return;
+  }
+
+  process.stderr.write(`[whazaa-watch] /kill: found Claude PID ${claudePid} on ${tty}\n`);
+
+  // Kill the Claude process
+  const killResult = spawnSync("kill", ["-TERM", claudePid], { timeout: 5000 });
+  if (killResult.status !== 0) {
+    process.stderr.write(`[whazaa-watch] /kill: SIGTERM failed, trying SIGKILL\n`);
+    spawnSync("kill", ["-KILL", claudePid], { timeout: 5000 });
+  }
+
+  // Wait for the shell prompt to come back (poll up to 10 seconds)
+  let atPrompt = false;
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    if (!isClaudeRunningInSession(target.id)) {
+      atPrompt = true;
+      break;
+    }
+  }
+
+  if (!atPrompt) {
+    process.stderr.write(`[whazaa-watch] /kill: session not at prompt after 10s, sending SIGKILL\n`);
+    spawnSync("kill", ["-KILL", claudePid], { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  // Restart Claude in the same session
+  typeIntoSession(target.id, "claude");
+
+  // Wait for Claude to start up
+  await new Promise((r) => setTimeout(r, 3000));
+
+  const paiName = getItermSessionVar(target.id);
+  const label = paiName ?? (target.path ? basename(target.path) : target.name);
+  await watcherSendMessage(`Killed and restarted Claude in *${label}*`).catch(() => {});
+  process.stderr.write(`[whazaa-watch] /kill: restarted Claude in session ${target.id}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2472,6 +2592,26 @@ end tell`;
     if (trimmedText === "/ss" || trimmedText === "/screenshot") {
       handleScreenshot().catch((err) => {
         process.stderr.write(`[whazaa-watch] /ss: unhandled error — ${err}\n`);
+      });
+      return;
+    }
+
+    // --- /kill N (alias: /k N) — kill a stuck Claude session and restart it --
+    const killMatch = trimmedText.match(/^\/(?:kill|k)\s+(\d+)$/);
+    if (killMatch) {
+      const num = parseInt(killMatch[1], 10);
+      const sessions = listClaudeSessions();
+      if (sessions.length === 0) {
+        watcherSendMessage("No Claude sessions found.").catch(() => {});
+        return;
+      }
+      if (num < 1 || num > sessions.length) {
+        watcherSendMessage(`Invalid session number. Use /s to list (1-${sessions.length}).`).catch(() => {});
+        return;
+      }
+      const target = sessions[num - 1];
+      handleKillSession(target).catch((err) => {
+        process.stderr.write(`[whazaa-watch] /kill: unhandled error — ${err}\n`);
       });
       return;
     }
