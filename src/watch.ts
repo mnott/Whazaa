@@ -38,7 +38,8 @@
  */
 
 import { existsSync, unlinkSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { spawnSync, execSync } from "node:child_process";
+import { spawnSync, execSync, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createServer, Socket, Server } from "node:net";
@@ -1776,6 +1777,77 @@ async function downloadImageToTemp(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Audio download and transcription helper
+// ---------------------------------------------------------------------------
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Download a Baileys audio message to a temp file and transcribe it with Whisper.
+ * Returns a formatted string "[Voice note]: <transcript>" or "[Audio]: <transcript>".
+ * Returns null on failure.
+ *
+ * @param msg       The Baileys message object
+ * @param sock      The active Baileys socket (for reupload requests)
+ * @param duration  Duration of the audio in seconds (from audioMessage.seconds)
+ * @param isPtt     True if the message is a voice note (ptt), false for regular audio
+ */
+async function downloadAudioAndTranscribe(
+  msg: proto.IWebMessageInfo,
+  sock: ReturnType<typeof makeWASocket>,
+  duration: number,
+  isPtt: boolean
+): Promise<string | null> {
+  const audioFile = join(tmpdir(), `whazaa-audio-${Date.now()}-${randomUUID().slice(0, 8)}.ogg`);
+  const label = isPtt ? "[Voice note]" : "[Audio]";
+
+  try {
+    process.stderr.write(`[whazaa-watch] Downloading audio (${duration}s, ptt=${isPtt})...\n`);
+
+    const buffer = await downloadMediaMessage(
+      msg as Parameters<typeof downloadMediaMessage>[0],
+      "buffer",
+      {},
+      {
+        logger: pino({ level: "silent" }),
+        reuploadRequest: sock.updateMediaMessage,
+      }
+    );
+
+    writeFileSync(audioFile, buffer as Buffer);
+    process.stderr.write(`[whazaa-watch] Audio saved to ${audioFile}, running Whisper...\n`);
+
+    // Run Whisper asynchronously with a 120-second timeout
+    await execFileAsync(
+      "/opt/homebrew/bin/whisper",
+      [audioFile, "--model", "large-v3-turbo", "--output_format", "txt", "--output_dir", tmpdir(), "--verbose", "False"],
+      { timeout: 120_000 }
+    );
+
+    // Whisper writes <basename>.txt in the output_dir
+    const txtPath = join(tmpdir(), `${basename(audioFile, ".ogg")}.txt`);
+    if (!existsSync(txtPath)) {
+      process.stderr.write(`[whazaa-watch] Whisper did not produce output at ${txtPath}\n`);
+      return null;
+    }
+
+    const transcript = readFileSync(txtPath, "utf-8").trim();
+    process.stderr.write(`[whazaa-watch] Transcription: ${transcript.slice(0, 80)}\n`);
+
+    // Clean up temp files
+    try { unlinkSync(audioFile); } catch { /* ignore */ }
+    try { unlinkSync(txtPath); } catch { /* ignore */ }
+
+    return `${label}: ${transcript}`;
+  } catch (err) {
+    process.stderr.write(`[whazaa-watch] Audio transcription failed: ${err}\n`);
+    // Clean up audio file if still present
+    try { unlinkSync(audioFile); } catch { /* ignore */ }
+    return null;
+  }
+}
+
 // --- WhatsApp watcher connection ---------------------------------------------
 
 interface WatcherConnStatus {
@@ -2054,7 +2126,10 @@ async function connectWatcher(
           !body &&
           (msg.message?.imageMessage != null || msg.message?.stickerMessage != null);
 
-        if (!body && !isImage) continue;
+        // Detect audio/voice note messages — these have no text body
+        const isAudio = !body && msg.message?.audioMessage != null;
+
+        if (!body && !isImage && !isAudio) continue;
         if (!remoteJid) continue;
 
         const remoteJidNorm = stripDevice(remoteJid);
@@ -2093,6 +2168,20 @@ async function connectWatcher(
                 process.stderr.write(`[whazaa-watch] Image delivery error: ${err}\n`);
               });
             }
+          } else if (isAudio) {
+            // Download audio, transcribe with Whisper, deliver transcript to iTerm2
+            const audioMsg = msg.message!.audioMessage!;
+            const duration = audioMsg.seconds ?? 0;
+            const isPtt = audioMsg.ptt === true;
+            const sockRef = sock;
+            if (sockRef) {
+              downloadAudioAndTranscribe(msg, sockRef, duration, isPtt).then((result) => {
+                if (!result) return;
+                onMessage(result, msgId, timestamp);
+              }).catch((err) => {
+                process.stderr.write(`[whazaa-watch] Audio delivery error: ${err}\n`);
+              });
+            }
           } else {
             // Existing behaviour: deliver to iTerm2 and MCP client queue
             onMessage(body!, msgId, timestamp);
@@ -2110,6 +2199,27 @@ async function connectWatcher(
             process.stderr.write(
               `[whazaa-watch] Incoming from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${body.slice(0, 60)}\n`
             );
+          } else if (isAudio) {
+            // Transcribe non-self-chat voice notes and enqueue for whatsapp_receive
+            const audioMsg = msg.message!.audioMessage!;
+            const duration = audioMsg.seconds ?? 0;
+            const isPtt = audioMsg.ptt === true;
+            const sockRef = sock;
+            if (sockRef) {
+              downloadAudioAndTranscribe(msg, sockRef, duration, isPtt).then((transcript) => {
+                if (!transcript) return;
+                enqueueContactMessage(remoteJidNorm, transcript, timestamp);
+                process.stderr.write(
+                  `[whazaa-watch] Transcribed audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${transcript.slice(0, 60)}\n`
+                );
+              }).catch((err) => {
+                process.stderr.write(`[whazaa-watch] Non-self audio transcription error: ${err}\n`);
+              });
+            } else {
+              process.stderr.write(
+                `[whazaa-watch] Incoming audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (no sock, skipping transcription)\n`
+              );
+            }
           } else {
             process.stderr.write(
               `[whazaa-watch] Incoming image from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (not forwarded to iTerm2)\n`
