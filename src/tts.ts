@@ -17,7 +17,7 @@
  *   WHAZAA_TTS_VOICE  Default voice name (default: "bm_fable")
  */
 
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -195,6 +195,42 @@ export async function textToVoiceNote(
       }
     }
   }
+}
+
+/**
+ * Synthesize text and play it through the Mac's local speakers using afplay.
+ * Non-blocking: the audio plays in the background while the watcher continues.
+ * The temporary WAV file is deleted after playback completes.
+ *
+ * @param text   The text to synthesize
+ * @param voice  Kokoro voice name (default: WHAZAA_TTS_VOICE env or "bm_fable")
+ */
+export async function speakLocally(text: string, voice?: string): Promise<void> {
+  if (!text || text.trim().length === 0) {
+    throw new Error("TTS: text must not be empty");
+  }
+
+  const resolvedVoice: KokoroVoice = resolveVoice(voice ?? DEFAULT_VOICE);
+
+  await ensureInitialized();
+
+  process.stderr.write(
+    `[whazaa-tts] Speaking locally: voice=${resolvedVoice}, text="${text.slice(0, 60)}${text.length > 60 ? "..." : ""}"\n`
+  );
+
+  const audio = await ttsInstance!.generate(text, { voice: resolvedVoice });
+
+  const wavPath = join(tmpdir(), `whazaa-speak-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`);
+  const wavArrayBuffer: ArrayBuffer = audio.toWav() as ArrayBuffer;
+  writeFileSync(wavPath, Buffer.from(wavArrayBuffer));
+
+  // Play via afplay (macOS built-in). Detached + unref so the watcher is not
+  // blocked waiting for playback to finish.
+  const child = spawn("afplay", [wavPath], { stdio: "ignore", detached: true });
+  child.on("close", () => {
+    try { unlinkSync(wavPath); } catch { /* ignore cleanup errors */ }
+  });
+  child.unref();
 }
 
 /**

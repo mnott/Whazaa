@@ -11,6 +11,8 @@
 
 import { connect, Socket } from "node:net";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { basename } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Protocol types
@@ -74,6 +76,12 @@ export interface RegisterResult {
   registered: boolean;
 }
 
+export interface RenameResult {
+  success: boolean;
+  name?: string;
+  error?: string;
+}
+
 export interface ChatEntry {
   jid: string;
   name: string;
@@ -110,8 +118,15 @@ export interface VoiceConfigResult {
   config?: {
     defaultVoice: string;
     voiceMode: boolean;
+    localMode: boolean;
     personas: Record<string, string>;
   };
+  error?: string;
+}
+
+export interface SpeakResult {
+  success: boolean;
+  voice?: string;
   error?: string;
 }
 
@@ -138,13 +153,37 @@ export class WatcherClient {
     return this.sessionId;
   }
 
+  /**
+   * Human-readable name derived from the current working directory.
+   * Used as the default session name when registering.
+   */
+  private get defaultName(): string {
+    const cwd = process.cwd();
+    const home = homedir();
+    if (cwd === home) return "Home";
+    return basename(cwd);
+  }
+
   // -------------------------------------------------------------------------
   // Public tool methods
   // -------------------------------------------------------------------------
 
-  async register(): Promise<RegisterResult> {
-    const result = await this.call("register", {});
+  async register(name?: string): Promise<RegisterResult> {
+    const params: Record<string, unknown> = {
+      name: name ?? this.defaultName,
+    };
+    // Pass ITERM_SESSION_ID if available so the watcher can skip the AppleScript scan
+    const itermSessionId = process.env.ITERM_SESSION_ID;
+    if (itermSessionId) {
+      params.itermSessionId = itermSessionId;
+    }
+    const result = await this.call("register", params);
     return result as unknown as RegisterResult;
+  }
+
+  async rename(name: string): Promise<RenameResult> {
+    const result = await this.call("rename", { name });
+    return result as unknown as RenameResult;
   }
 
   async status(): Promise<StatusResult> {
@@ -211,6 +250,13 @@ export class WatcherClient {
     const params: Record<string, unknown> = { action, ...updates };
     const result = await this.call("voice_config", params);
     return result as unknown as VoiceConfigResult;
+  }
+
+  async speak(text: string, voice?: string): Promise<SpeakResult> {
+    const params: Record<string, unknown> = { text };
+    if (voice !== undefined) params.voice = voice;
+    const result = await this.call("speak", params);
+    return result as unknown as SpeakResult;
   }
 
   // -------------------------------------------------------------------------

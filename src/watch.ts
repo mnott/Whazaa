@@ -40,10 +40,10 @@
 import { existsSync, unlinkSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { spawnSync, execSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createServer, Socket, Server } from "node:net";
 import { randomUUID } from "node:crypto";
-import { textToVoiceNote } from "./tts.js";
+import { textToVoiceNote, speakLocally } from "./tts.js";
 
 import makeWASocket, {
   DisconnectReason,
@@ -91,6 +91,16 @@ interface ContactEntry {
 // ---------------------------------------------------------------------------
 // Session routing state
 // ---------------------------------------------------------------------------
+
+interface RegisteredSession {
+  sessionId: string;       // TERM_SESSION_ID
+  name: string;            // Human-readable name like "Whazaa Dev"
+  itermSessionId?: string; // iTerm2 session UUID (for tab title)
+  registeredAt: number;    // timestamp
+}
+
+/** Registry of all connected MCP sessions, keyed by TERM_SESSION_ID */
+const sessionRegistry = new Map<string, RegisteredSession>();
 
 /** The session ID of the most-recently-active MCP client */
 let activeClientId: string | null = null;
@@ -184,12 +194,14 @@ const VOICE_CONFIG_PATH = join(WHAZAA_DIR, "voice-config.json");
 interface VoiceConfig {
   defaultVoice: string;
   voiceMode: boolean;
+  localMode: boolean;
   personas: Record<string, string>;
 }
 
 const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   defaultVoice: "bm_fable",
   voiceMode: false,
+  localMode: false,
   personas: {
     "Nicole": "af_nicole",
     "George": "bm_george",
@@ -454,6 +466,121 @@ async function watcherSendMessage(message: string, recipient?: string): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// Session registry helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Set a named iTerm2 session variable (user.paiName) on the given session.
+ * This persists independently of the tab title, which Claude Code overwrites.
+ * Silently ignores errors (iTerm2 not running, session not found, etc.).
+ */
+function setItermSessionVar(itermSessionId: string, name: string): void {
+  try {
+    const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const script = `tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${itermSessionId}" then
+          tell aSession
+            set variable named "user.paiName" to "${escaped}"
+          end tell
+          return
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell`;
+    execSync(`osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`, {
+      timeout: 5000,
+      shell: "/bin/bash",
+    });
+  } catch {
+    // silently ignore
+  }
+}
+
+/**
+ * Read the user.paiName session variable from the given iTerm2 session.
+ * Returns the value as a string, or null if not set or on error.
+ */
+function getItermSessionVar(itermSessionId: string): string | null {
+  try {
+    const script = `tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${itermSessionId}" then
+          tell aSession
+            try
+              return (variable named "user.paiName")
+            on error
+              return ""
+            end try
+          end tell
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`;
+    const result = execSync(`osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`, {
+      timeout: 5000,
+      encoding: "utf8",
+      shell: "/bin/bash",
+    }).trim();
+    return result || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cross-reference all iTerm2 sessions to find the one whose TERM_SESSION_ID
+ * env var matches the given termSessionId.
+ *
+ * Returns the iTerm2 session UUID (the `id of aSession` AppleScript value),
+ * or null if not found.
+ *
+ * If the caller already has ITERM_SESSION_ID available, they can pass it
+ * directly as `itermSessionIdHint` to skip the AppleScript scan.
+ */
+function findItermSessionForTermId(
+  termSessionId: string,
+  itermSessionIdHint?: string
+): string | null {
+  // If the client passed its ITERM_SESSION_ID directly, trust it
+  if (itermSessionIdHint) {
+    return itermSessionIdHint;
+  }
+
+  // Otherwise scan all iTerm2 sessions for a matching TERM_SESSION_ID
+  const script = `
+tell application "iTerm2"
+  set output to ""
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        set sessionId to id of aSession
+        try
+          set termId to (variable named "TERM_SESSION_ID" of aSession)
+        on error
+          set termId to ""
+        end try
+        if termId is "${termSessionId}" then
+          return sessionId
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`;
+
+  const result = runAppleScript(script);
+  return result && result !== "" ? result : null;
+}
+
+// ---------------------------------------------------------------------------
 // IPC server
 // ---------------------------------------------------------------------------
 
@@ -537,12 +664,54 @@ async function handleRequest(
 
   switch (method) {
     case "register": {
-      activeClientId = sessionId;
+      const name = params.name != null ? String(params.name) : "Unknown";
+      const itermHint = params.itermSessionId != null ? String(params.itermSessionId) : undefined;
+      const itermId = findItermSessionForTermId(sessionId, itermHint);
+
+      sessionRegistry.set(sessionId, {
+        sessionId,
+        name,
+        itermSessionId: itermId ?? undefined,
+        registeredAt: Date.now(),
+      });
+
+      if (itermId) {
+        setItermSessionVar(itermId, name);
+      }
+
+      // Only claim activeClientId if no session is currently registered, or
+      // if the previously-active session has since disconnected.
+      if (!activeClientId || !sessionRegistry.has(activeClientId) || activeClientId === sessionId) {
+        activeClientId = sessionId;
+      }
+
       if (!clientQueues.has(sessionId)) {
         clientQueues.set(sessionId, []);
       }
-      process.stderr.write(`[whazaa-watch] IPC: registered client ${sessionId}\n`);
+      process.stderr.write(`[whazaa-watch] IPC: registered client ${sessionId} (name: "${name}", iTerm: ${itermId ?? "unknown"})\n`);
       sendResponse(socket, { id, ok: true, result: { registered: true } });
+      socket.end();
+      break;
+    }
+
+    case "rename": {
+      const newName = params.name != null ? String(params.name) : "";
+      if (!newName) {
+        sendResponse(socket, { id, ok: false, error: "name is required" });
+        socket.end();
+        break;
+      }
+      const entry = sessionRegistry.get(sessionId);
+      if (entry) {
+        entry.name = newName;
+        if (entry.itermSessionId) {
+          setItermSessionVar(entry.itermSessionId, newName);
+        }
+        process.stderr.write(`[whazaa-watch] IPC: renamed session ${sessionId} to "${newName}"\n`);
+        sendResponse(socket, { id, ok: true, result: { success: true, name: newName } });
+      } else {
+        sendResponse(socket, { id, ok: false, error: "Session not registered" });
+      }
       socket.end();
       break;
     }
@@ -571,8 +740,7 @@ async function handleRequest(
 
       const recipient = params.recipient != null ? String(params.recipient) : undefined;
 
-      // Mark this session as the active client
-      activeClientId = sessionId;
+      // Ensure the sender has a queue even if not yet registered
       if (!clientQueues.has(sessionId)) {
         clientQueues.set(sessionId, []);
       }
@@ -1008,6 +1176,34 @@ async function handleRequest(
       break;
     }
 
+    case "speak": {
+      const speakText = params.text != null ? String(params.text) : "";
+      if (!speakText.trim()) {
+        sendResponse(socket, { id, ok: false, error: "text is required for speak" });
+        socket.end();
+        break;
+      }
+
+      const speakVoice = params.voice != null ? String(params.voice) : undefined;
+
+      try {
+        await speakLocally(speakText, speakVoice);
+        sendResponse(socket, {
+          id,
+          ok: true,
+          result: {
+            success: true,
+            voice: speakVoice ?? process.env.WHAZAA_TTS_VOICE ?? "bm_fable",
+          },
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendResponse(socket, { id, ok: false, error: msg });
+      }
+      socket.end();
+      break;
+    }
+
     case "voice_config": {
       const { action, ...updates } = params as { action?: string } & Record<string, unknown>;
       if (action === "get") {
@@ -1017,6 +1213,7 @@ async function handleRequest(
         const config = loadVoiceConfig();
         if (updates.defaultVoice !== undefined) config.defaultVoice = String(updates.defaultVoice);
         if (updates.voiceMode !== undefined) config.voiceMode = Boolean(updates.voiceMode);
+        if (updates.localMode !== undefined) config.localMode = Boolean(updates.localMode);
         if (updates.personas !== undefined && typeof updates.personas === "object" && updates.personas !== null) {
           config.personas = { ...config.personas, ...(updates.personas as Record<string, string>) };
         }
@@ -1902,24 +2099,51 @@ export async function watch(rawSessionId?: string): Promise<void> {
 
     // --- /sessions (aliases: /s) — list sessions ------------------------------
     if (trimmedText === "/sessions" || trimmedText === "/s") {
-      const sessions = listClaudeSessions();
-      if (sessions.length === 0) {
+      // Clean up stale registry entries by cross-referencing live iTerm2 sessions
+      const liveSessions = listClaudeSessions();
+      const liveItermIds = new Set(liveSessions.map((s) => s.id));
+      for (const [sid, entry] of sessionRegistry) {
+        if (entry.itermSessionId && !liveItermIds.has(entry.itermSessionId)) {
+          sessionRegistry.delete(sid);
+          clientQueues.delete(sid);
+          if (activeClientId === sid) {
+            const remaining = [...sessionRegistry.values()].sort((a, b) => b.registeredAt - a.registeredAt);
+            activeClientId = remaining.length > 0 ? remaining[0].sessionId : null;
+          }
+        }
+      }
+
+      if (liveSessions.length === 0 && sessionRegistry.size === 0) {
         watcherSendMessage("No Claude sessions found.").catch(() => {});
         return;
       }
-      const lines = sessions.map((s, i) => {
-        const label = s.path ? s.path.replace(homedir(), "~") : s.name;
-        return `*${i + 1}.* ${label}`;
+
+      // Build display list: prefer user.paiName session variable, then registry,
+      // then cwd basename, then iTerm2 session name.
+      const lines = liveSessions.map((s, i) => {
+        // Find registry entry by matching iTerm2 session ID
+        const regEntry = [...sessionRegistry.values()].find(
+          (e) => e.itermSessionId === s.id
+        );
+        // Read the persistent session variable set by setItermSessionVar
+        const paiName = getItermSessionVar(s.id);
+        const label = paiName
+          ?? (regEntry ? regEntry.name : null)
+          ?? (s.path ? basename(s.path) : null)
+          ?? s.name;
+        const isActive = regEntry && activeClientId === regEntry.sessionId;
+        return `${i + 1}. ${label}${isActive ? " \u2190 active" : ""}`;
       });
-      const reply = `*Open Claude sessions:*\n${lines.join("\n")}\n\nSwitch with */1*, */2*, etc.`;
+      const reply = lines.join("\n");
       watcherSendMessage(reply).catch(() => {});
       return;
     }
 
-    // --- /N — switch to session N (e.g. /1, /2, /3) -------------------------
-    const sessionSwitchMatch = trimmedText.match(/^\/(\d+)$/);
+    // --- /N [name] — switch to session N, optionally rename it (/1, /2 Whazaa TTS) ---
+    const sessionSwitchMatch = trimmedText.match(/^\/(\d+)\s*(.*)?$/);
     if (sessionSwitchMatch) {
       const num = parseInt(sessionSwitchMatch[1], 10);
+      const newName = sessionSwitchMatch[2]?.trim() || null;
       const sessions = listClaudeSessions();
       if (sessions.length === 0) {
         watcherSendMessage("No Claude sessions found.").catch(() => {});
@@ -1947,9 +2171,31 @@ end tell`;
       const focusResult = runAppleScript(focusScript);
       if (focusResult === "focused") {
         activeSessionId = chosen.id;
-        const label = chosen.path ? chosen.path.replace(homedir(), "~") : chosen.name;
-        process.stderr.write(`[whazaa-watch] /sessions: switched to session ${chosen.id} (${label})\n`);
-        watcherSendMessage(`Switched to *${label}*`).catch(() => {});
+
+        // Also update activeClientId to the registered session for this iTerm2 session
+        const regEntry = [...sessionRegistry.values()].find(
+          (e) => e.itermSessionId === chosen.id
+        );
+        if (regEntry) {
+          activeClientId = regEntry.sessionId;
+          process.stderr.write(`[whazaa-watch] /sessions: activeClientId -> ${regEntry.sessionId} ("${regEntry.name}")\n`);
+        }
+
+        // If a new name was provided, persist it as a session variable and update registry
+        if (newName) {
+          setItermSessionVar(chosen.id, newName);
+          if (regEntry) {
+            regEntry.name = newName;
+          }
+          process.stderr.write(`[whazaa-watch] /sessions: renamed session ${chosen.id} to "${newName}"\n`);
+        }
+
+        const displayName = newName
+          ?? getItermSessionVar(chosen.id)
+          ?? (regEntry ? regEntry.name : null)
+          ?? (chosen.path ? basename(chosen.path) : chosen.name);
+        process.stderr.write(`[whazaa-watch] /sessions: switched to iTerm2 session ${chosen.id} (${displayName})\n`);
+        watcherSendMessage(`Switched to *${displayName}*`).catch(() => {});
       } else {
         watcherSendMessage("Session not found — it may have closed.").catch(() => {});
       }
