@@ -99,6 +99,12 @@ export interface HistoryResult {
   count: number;
 }
 
+export interface TtsResult {
+  targetJid: string;
+  voice: string;
+  bytesSent: number;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -181,6 +187,14 @@ export class WatcherClient {
     if (params.count !== undefined) ipcParams.count = params.count;
     const result = await this.call("history", ipcParams);
     return result as unknown as HistoryResult;
+  }
+
+  async tts(params: { text: string; voice?: string; jid?: string }): Promise<TtsResult> {
+    const ipcParams: Record<string, unknown> = { text: params.text };
+    if (params.voice !== undefined) ipcParams.voice = params.voice;
+    if (params.jid !== undefined) ipcParams.jid = params.jid;
+    const result = await this.call("tts", ipcParams);
+    return result as unknown as TtsResult;
   }
 
   // -------------------------------------------------------------------------

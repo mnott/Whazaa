@@ -24,6 +24,7 @@
  *   receive   — Drain this session's incoming message queue
  *   wait      — Long-poll: resolve on next message or timeout
  *   login     — Trigger QR re-pairing
+ *   tts       — Convert text to speech and send as voice note
  *
  * Smart session resolution for iTerm2 delivery (unchanged from before):
  *   1. Try the cached session, but only if Claude is actually running there
@@ -42,6 +43,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, Socket, Server } from "node:net";
 import { randomUUID } from "node:crypto";
+import { textToVoiceNote } from "./tts.js";
 
 import makeWASocket, {
   DisconnectReason,
@@ -893,6 +895,72 @@ async function handleRequest(
         ok: true,
         result: { messages: formatted as unknown as Record<string, unknown>[], count: formatted.length },
       });
+      socket.end();
+      break;
+    }
+
+    case "tts": {
+      const ttsText = params.text != null ? String(params.text) : "";
+      if (!ttsText.trim()) {
+        sendResponse(socket, { id, ok: false, error: "text is required for TTS" });
+        socket.end();
+        break;
+      }
+
+      const ttsVoice = params.voice != null ? String(params.voice) : undefined;
+      const ttsRecipient = params.jid != null ? String(params.jid) : undefined;
+
+      if (!watcherSock) {
+        sendResponse(socket, { id, ok: false, error: "WhatsApp socket not initialized. Is the watcher connected?" });
+        socket.end();
+        break;
+      }
+      if (!watcherStatus.connected) {
+        sendResponse(socket, { id, ok: false, error: "WhatsApp is not connected. Check status with whatsapp_status." });
+        socket.end();
+        break;
+      }
+      if (!watcherStatus.selfJid) {
+        sendResponse(socket, { id, ok: false, error: "Self JID not yet known. Wait for connection to fully open." });
+        socket.end();
+        break;
+      }
+
+      const targetJid = ttsRecipient ? resolveRecipient(ttsRecipient) : watcherStatus.selfJid;
+
+      try {
+        const audioBuffer = await textToVoiceNote(ttsText, ttsVoice);
+
+        const result = await watcherSock.sendMessage(targetJid, {
+          audio: audioBuffer,
+          mimetype: "audio/ogg; codecs=opus",
+          ptt: true,
+        });
+
+        if (result?.key?.id) {
+          const msgId = result.key.id;
+          sentMessageIds.add(msgId);
+          setTimeout(() => sentMessageIds.delete(msgId), 30_000);
+        }
+
+        // Track outbound contact (non-self only)
+        if (targetJid !== watcherStatus.selfJid) {
+          trackContact(targetJid, null, Date.now());
+        }
+
+        sendResponse(socket, {
+          id,
+          ok: true,
+          result: {
+            targetJid,
+            voice: ttsVoice ?? process.env.WHAZAA_TTS_VOICE ?? "af_heart",
+            bytesSent: audioBuffer.length,
+          },
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendResponse(socket, { id, ok: false, error: msg });
+      }
       socket.end();
       break;
     }

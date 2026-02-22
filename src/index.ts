@@ -2,10 +2,11 @@
 /**
  * index.ts — Whazaa MCP server entry point
  *
- * Exposes five tools over the Model Context Protocol (stdio transport):
+ * Exposes tools over the Model Context Protocol (stdio transport):
  *
  *   whatsapp_status   — Report connection state and phone number
- *   whatsapp_send     — Send a message to your own WhatsApp number
+ *   whatsapp_send     — Send a message to your own WhatsApp number (with optional TTS voice)
+ *   whatsapp_tts      — Convert text to speech and send as a WhatsApp voice note
  *   whatsapp_receive  — Drain queued incoming messages from your phone
  *   whatsapp_wait     — Long-poll for the next incoming message
  *   whatsapp_login    — Trigger a new QR pairing flow
@@ -39,7 +40,8 @@ import {
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 import { watch } from "./watch.js";
-import { WatcherClient, ChatsResult, HistoryResult } from "./ipc-client.js";
+import { WatcherClient, ChatsResult, HistoryResult, TtsResult } from "./ipc-client.js";
+import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
 // ---------------------------------------------------------------------------
@@ -274,6 +276,9 @@ server.tool(
     "Recipient can be a phone number with country code (e.g. '+41764502698'),",
     "a WhatsApp JID (e.g. '41764502698@s.whatsapp.net'), or a contact name.",
     "Supports basic Markdown: **bold**, *italic*, `code`.",
+    "Optionally set voice to send the message as a TTS voice note instead of text.",
+    "Use voice='true' or voice='default' for the default voice,",
+    "or a specific voice name like 'af_heart', 'bm_george', 'af_bella', etc.",
   ].join(" "),
   {
     message: z
@@ -286,13 +291,96 @@ server.tool(
       .describe(
         "Optional recipient: phone number (e.g. '+41764502698'), WhatsApp JID, or contact name. Omit to send to self-chat."
       ),
+    voice: z
+      .string()
+      .optional()
+      .describe(
+        "Optional: if set, send message as a TTS voice note using Kokoro. Use 'true' or 'default' for the default voice (af_heart), or a specific voice name like 'bm_george', 'af_bella', 'af_nova'."
+      ),
   },
-  async ({ message, recipient }) => {
+  async ({ message, recipient, voice }) => {
     try {
+      // If voice is requested, delegate to TTS IPC method
+      if (voice !== undefined && voice !== "") {
+        const result: TtsResult = await watcher.tts({
+          text: message,
+          voice: voice,
+          jid: recipient,
+        });
+        const dest = result.targetJid ?? "self-chat";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Voice note sent to ${dest} (voice: ${result.voice}, ${result.bytesSent} bytes)`,
+            },
+          ],
+        };
+      }
+
       const result = await watcher.send(message, recipient);
       const dest = result.targetJid ?? "self-chat";
       return {
         content: [{ type: "text", text: `Sent to ${dest}: ${result.preview}` }],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_tts
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_tts",
+  [
+    "Convert text to speech and send as a WhatsApp voice note.",
+    "Uses Kokoro TTS — 100% local, no internet required after first run.",
+    "The model (~160 MB) is downloaded on first use and cached locally.",
+    `Available voices: ${listVoices().join(", ")}.`,
+    "Without a recipient, sends to your own self-chat.",
+    "With a recipient, sends to any contact or group.",
+  ].join(" "),
+  {
+    message: z
+      .string()
+      .min(1)
+      .describe("The text to convert to speech and send as a voice note"),
+    voice: z
+      .string()
+      .optional()
+      .default("af_heart")
+      .describe(
+        "Kokoro voice to use (default: 'af_heart'). Examples: 'af_bella', 'af_nova', 'bm_george', 'bm_daniel', 'bf_emma'."
+      ),
+    recipient: z
+      .string()
+      .optional()
+      .describe(
+        "Optional recipient: phone number (e.g. '+41764502698'), WhatsApp JID, or contact name. Omit to send to self-chat."
+      ),
+  },
+  async ({ message, voice, recipient }) => {
+    try {
+      const result: TtsResult = await watcher.tts({
+        text: message,
+        voice: voice,
+        jid: recipient,
+      });
+      const dest = result.targetJid ?? "self-chat";
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Voice note sent to ${dest} (voice: ${result.voice}, ${result.bytesSent} bytes)`,
+          },
+        ],
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
