@@ -110,6 +110,43 @@ async function setup(): Promise<void> {
   }
 
   // ------------------------------------------------------------------
+  // Step 1b: Install /name skill for session renaming
+  // ------------------------------------------------------------------
+  const skillDir = join(homedir(), ".claude", "skills", "Name");
+  const skillPath = join(skillDir, "SKILL.md");
+  if (existsSync(skillPath)) {
+    console.log("Skill /name already installed");
+  } else {
+    mkdirSync(skillDir, { recursive: true });
+    const skillContent = [
+      "---",
+      "name: name",
+      'description: Rename the current Claude session (tab title + registry). USE WHEN user says "/name", "name this session", "rename session", OR wants to label what they\'re working on.',
+      "user_invocable: true",
+      "---",
+      "",
+      "# Name — Session Renaming",
+      "",
+      "Rename the current session using the Whazaa `whatsapp_rename` MCP tool.",
+      "",
+      "## Usage",
+      "",
+      "```",
+      "/name <new name>",
+      "```",
+      "",
+      "## Instructions",
+      "",
+      "When this skill is invoked with arguments, immediately call `whatsapp_rename` with the argument as the name. No confirmation needed. Report the result.",
+      "",
+      "If no argument is provided, ask what name to use.",
+      "",
+    ].join("\n");
+    writeFileSync(skillPath, skillContent);
+    console.log("Installed /name skill for session renaming");
+  }
+
+  // ------------------------------------------------------------------
   // Step 2: Check whether already paired
   // ------------------------------------------------------------------
   const authDir = resolveAuthDir();
