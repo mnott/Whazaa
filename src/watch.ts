@@ -670,7 +670,8 @@ end tell`;
       encoding: "utf8",
       shell: "/bin/bash",
     }).trim();
-    return result || null;
+    // AppleScript returns literal "missing value" when variable is unset
+    return (result && result !== "missing value") ? result : null;
   } catch {
     return null;
   }
