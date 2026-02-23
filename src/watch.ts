@@ -1499,30 +1499,28 @@ function expandTilde(p: string): string {
  * Handle a /t [command] command received via WhatsApp.
  * Opens a raw terminal tab in iTerm2 (no Claude). If a command is given, runs it.
  */
-function handleTerminal(command: string | null): void {
-  process.stderr.write(`[whazaa-watch] /t -> ${command ?? "(plain shell)"}\n`);
+function handleTerminal(nameOrNull: string | null): void {
+  const sessionName = nameOrNull || null;
+  process.stderr.write(`[whazaa-watch] /t -> ${sessionName ?? "(new claude session)"}\n`);
 
-  // Open a new tab with a plain shell — NOT Claude.
-  // Optionally run a command in it.
-  const escapedCmd = command
-    ? command.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
-    : null;
-
-  const writeBlock = escapedCmd
-    ? `\n    tell newSession\n      write text "${escapedCmd}"\n    end tell`
-    : "";
-
+  // Open a new tab and launch Claude so it appears in /s and messages route to it.
   const script = `
 tell application "iTerm2"
   if (count of windows) = 0 then
     set newWindow to (create window with default profile)
-    set newSession to current session of current tab of newWindow${writeBlock}
+    set newSession to current session of current tab of newWindow
+    tell newSession
+      write text "claude"
+    end tell
     activate
     return id of newSession
   else
     tell current window
       set newTab to (create tab with default profile)
-      set newSession to current session of newTab${writeBlock}
+      set newSession to current session of newTab
+      tell newSession
+        write text "claude"
+      end tell
       return id of newSession
     end tell
   end if
@@ -1533,9 +1531,16 @@ end tell`;
     process.stderr.write("[whazaa-watch] /t: failed to open terminal tab\n");
     watcherSendMessage("Failed to open terminal tab.").catch(() => {});
   } else {
-    const label = command ?? "shell";
-    process.stderr.write(`[whazaa-watch] /t: opened terminal (session ${result})${command ? ` running: ${command}` : ""}\n`);
-    watcherSendMessage(`Terminal opened${command ? `: *${command}*` : ""}`).catch(() => {});
+    // Track the new session as active so messages route to it
+    activeItermSessionId = result;
+    activeClientId = null; // no MCP client yet — will be set when Claude registers
+
+    // Always persist a session name so /s can find it immediately
+    const label = sessionName ?? "Claude";
+    setItermSessionVar(result, label);
+
+    process.stderr.write(`[whazaa-watch] /t: opened ${label} (session ${result})\n`);
+    watcherSendMessage(`Opened *${label}* ← active`).catch(() => {});
   }
 }
 
@@ -2611,6 +2616,16 @@ export async function watch(rawSessionId?: string): Promise<void> {
             const remaining = [...sessionRegistry.values()].sort((a, b) => b.registeredAt - a.registeredAt);
             activeClientId = remaining.length > 0 ? remaining[0].sessionId : null;
           }
+        }
+      }
+
+      // Include pending /t sessions that haven't fully started Claude yet.
+      // activeItermSessionId may point to a tab where Claude is still loading.
+      if (activeItermSessionId && !liveItermIds.has(activeItermSessionId)) {
+        const paiName = getItermSessionVar(activeItermSessionId);
+        if (paiName) {
+          liveSessions.push({ id: activeItermSessionId, name: paiName, path: "" });
+          liveItermIds.add(activeItermSessionId);
         }
       }
 
