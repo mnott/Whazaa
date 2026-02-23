@@ -1,8 +1,10 @@
 # Whazaa
 
-WhatsApp bridge for Claude Code. You message yourself on WhatsApp, Claude receives it. Claude responds, you see it on WhatsApp. Your phone becomes a parallel terminal.
+**Your phone is now a Claude Code terminal.** Send a WhatsApp message, Claude gets it. Claude responds, you see it on WhatsApp. Text, images, voice notes — in both directions.
 
-Send text, images, voice notes — even screenshots of your Claude session. Manage multiple Claude sessions from your phone with `/s`, switch between them, or `/kill` a stuck one and restart it fresh. Get TTS responses spoken back to you — 28 voices, fully local, zero cloud dependencies.
+Dictate a voice note while driving and Claude starts coding. Send a screenshot from your phone and Claude reads it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh.
+
+One command to set up. Zero cloud dependencies for voice. Works with any WhatsApp account.
 
 ---
 
@@ -58,12 +60,16 @@ Restart Claude Code. Whazaa connects automatically from now on.
 - Node.js >= 18
 - macOS with [iTerm2](https://iterm2.com/) for the `watch` command and iTerm2 delivery
 - [ffmpeg](https://ffmpeg.org/) for TTS voice note conversion (WAV to OGG Opus)
+- [Whisper](https://github.com/openai/whisper) for voice note transcription (optional — only needed to receive audio/voice messages)
 
-Install ffmpeg via Homebrew:
+Install ffmpeg and Whisper via Homebrew:
 
 ```bash
 brew install ffmpeg
+pip install openai-whisper
 ```
+
+The default transcription model is `large-v3-turbo`. Override it with the `WHAZAA_WHISPER_MODEL` environment variable (e.g. `WHAZAA_WHISPER_MODEL=base` for faster but less accurate transcription).
 
 The Kokoro TTS model (~160 MB) is downloaded automatically on first use of `whatsapp_tts` or `whatsapp_speak` and cached locally. Subsequent calls are fast.
 
