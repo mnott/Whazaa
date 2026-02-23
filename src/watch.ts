@@ -1903,6 +1903,15 @@ async function downloadImageToTemp(
 
 const execFileAsync = promisify(execFile);
 
+/** Resolved path to the whisper binary (supports Homebrew on Apple Silicon and Intel). */
+const WHISPER_BIN =
+  ["/opt/homebrew/bin/whisper", "/usr/local/bin/whisper", "whisper"].find(
+    (p) => p === "whisper" || existsSync(p)
+  ) ?? "whisper";
+
+/** Whisper model to use for transcription. Override with WHAZAA_WHISPER_MODEL env var. */
+const WHISPER_MODEL = process.env.WHAZAA_WHISPER_MODEL || "large-v3-turbo";
+
 /**
  * Download a Baileys audio message to a temp file and transcribe it with Whisper.
  * Returns a formatted string "[Voice note]: <transcript>" or "[Audio]: <transcript>".
@@ -1919,8 +1928,19 @@ async function downloadAudioAndTranscribe(
   duration: number,
   isPtt: boolean
 ): Promise<string | null> {
-  const audioFile = join(tmpdir(), `whazaa-audio-${Date.now()}-${randomUUID().slice(0, 8)}.ogg`);
+  const audioBase = `whazaa-audio-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const audioFile = join(tmpdir(), `${audioBase}.ogg`);
   const label = isPtt ? "[Voice note]" : "[Audio]";
+
+  // Collect all Whisper output artifacts for cleanup in finally block
+  const filesToClean: string[] = [
+    audioFile,
+    join(tmpdir(), `${audioBase}.txt`),
+    join(tmpdir(), `${audioBase}.json`),
+    join(tmpdir(), `${audioBase}.vtt`),
+    join(tmpdir(), `${audioBase}.srt`),
+    join(tmpdir(), `${audioBase}.tsv`),
+  ];
 
   try {
     process.stderr.write(`[whazaa-watch] Downloading audio (${duration}s, ptt=${isPtt})...\n`);
@@ -1936,17 +1956,25 @@ async function downloadAudioAndTranscribe(
     );
 
     writeFileSync(audioFile, buffer as Buffer);
-    process.stderr.write(`[whazaa-watch] Audio saved to ${audioFile}, running Whisper...\n`);
+    process.stderr.write(`[whazaa-watch] Audio saved to ${audioFile}, running Whisper (${WHISPER_BIN}, model=${WHISPER_MODEL})...\n`);
 
-    // Run Whisper asynchronously with a 120-second timeout
+    // Run Whisper with a 120-second timeout.
+    // Pass an expanded PATH so Whisper can find ffmpeg even when launched from
+    // launchd (which only has /usr/bin:/bin:/usr/sbin:/sbin in its environment).
     await execFileAsync(
-      "/opt/homebrew/bin/whisper",
-      [audioFile, "--model", "large-v3-turbo", "--output_format", "txt", "--output_dir", tmpdir(), "--verbose", "False"],
-      { timeout: 120_000 }
+      WHISPER_BIN,
+      [audioFile, "--model", WHISPER_MODEL, "--output_format", "txt", "--output_dir", tmpdir(), "--verbose", "False"],
+      {
+        timeout: 120_000,
+        env: {
+          ...process.env,
+          PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || "/usr/bin:/bin"}`,
+        },
+      }
     );
 
     // Whisper writes <basename>.txt in the output_dir
-    const txtPath = join(tmpdir(), `${basename(audioFile, ".ogg")}.txt`);
+    const txtPath = join(tmpdir(), `${audioBase}.txt`);
     if (!existsSync(txtPath)) {
       process.stderr.write(`[whazaa-watch] Whisper did not produce output at ${txtPath}\n`);
       return null;
@@ -1955,16 +1983,15 @@ async function downloadAudioAndTranscribe(
     const transcript = readFileSync(txtPath, "utf-8").trim();
     process.stderr.write(`[whazaa-watch] Transcription: ${transcript.slice(0, 80)}\n`);
 
-    // Clean up temp files
-    try { unlinkSync(audioFile); } catch { /* ignore */ }
-    try { unlinkSync(txtPath); } catch { /* ignore */ }
-
     return `${label}: ${transcript}`;
   } catch (err) {
     process.stderr.write(`[whazaa-watch] Audio transcription failed: ${err}\n`);
-    // Clean up audio file if still present
-    try { unlinkSync(audioFile); } catch { /* ignore */ }
     return null;
+  } finally {
+    // Always clean up all Whisper output artifacts
+    for (const f of filesToClean) {
+      try { unlinkSync(f); } catch { /* ignore — file may not exist */ }
+    }
   }
 }
 

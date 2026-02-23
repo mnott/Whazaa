@@ -32,3 +32,6 @@ yarn-error.log*
 
 # TypeScript incremental compilation info
 *.tsbuildinfo
+
+# Whisper test artifacts
+test_noise.*
