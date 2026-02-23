@@ -1655,11 +1655,6 @@ async function handleScreenshot(): Promise<void> {
   end repeat
   return ""
 end tell`;
-        // Check if the target session is already frontmost (skip switch + delay)
-        const currentFrontScript = `tell application "iTerm2" to id of current session of current tab of window 1`;
-        let currentSessionId = "";
-        try { currentSessionId = runAppleScript(currentFrontScript) || ""; } catch {}
-        const alreadyFront = currentSessionId === itermSessionId;
 
         const switchResult = runAppleScript(switchScript);
         if (!switchResult || switchResult !== "ok") {
@@ -1670,12 +1665,6 @@ end tell`;
           ).toString().trim();
           process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
         } else {
-          // Step 2: Wait for iTerm2 to render the newly-visible tab.
-          // Skip the delay if the session was already frontmost (no tab switch needed).
-          if (!alreadyFront) {
-            await new Promise((r) => setTimeout(r, 500));
-          }
-
           // Step 3: Get the window ID in a separate AppleScript call.
           const idScript = `tell application "iTerm2"
   repeat with w in windows
@@ -1702,7 +1691,8 @@ end tell`;
           }
         }
       } else {
-        // No active session known — fall back to window 1
+        // No active session known — activate iTerm2 and fall back to window 1
+        runAppleScript('tell application "iTerm2" to activate');
         windowId = execSync(
           'osascript -e \'tell application "iTerm2" to id of window 1\'',
           { timeout: 10_000 }
@@ -1719,8 +1709,39 @@ end tell`;
       return;
     }
 
-    // Capture the window: -x (no shutter sound), -o (no shadow), -l (window by ID)
-    execSync(`screencapture -x -o -l ${windowId} "${filePath}"`, { timeout: 15_000 });
+    // Step 2: Wait for iTerm2 to fully redraw after being activated.
+    // When iTerm2 is in the background, macOS throttles rendering and the
+    // window server holds a stale buffer. `activate` requests a redraw but
+    // we must wait for it to complete before capturing.
+    await new Promise((r) => setTimeout(r, 1500));
+
+    // Get the window bounds and capture from the display framebuffer using -R
+    // instead of -l. The -l flag captures from the window server's cached
+    // buffer which can be stale when iTerm2 was in the background. The -R
+    // flag captures from the actual screen, which is always up-to-date after
+    // the window has been brought to front and redrawn.
+    let captureCmd: string;
+    try {
+      const boundsScript = `tell application "System Events" to tell process "iTerm2"
+  set w to window 1
+  set {x, y} to position of w
+  set {width, height} to size of w
+  return (x as text) & "," & (y as text) & "," & (width as text) & "," & (height as text)
+end tell`;
+      const bounds = runAppleScript(boundsScript);
+      if (bounds && bounds.includes(",")) {
+        captureCmd = `screencapture -x -R ${bounds} "${filePath}"`;
+        process.stderr.write(`[whazaa-watch] /ss: capturing screen region ${bounds}\n`);
+      } else {
+        // Bounds lookup failed — fall back to window layer capture
+        captureCmd = `screencapture -x -o -l ${windowId} "${filePath}"`;
+        process.stderr.write(`[whazaa-watch] /ss: bounds lookup failed, falling back to -l capture\n`);
+      }
+    } catch {
+      captureCmd = `screencapture -x -o -l ${windowId} "${filePath}"`;
+      process.stderr.write(`[whazaa-watch] /ss: bounds error, falling back to -l capture\n`);
+    }
+    execSync(captureCmd, { timeout: 15_000 });
 
     const buffer = readFileSync(filePath);
 
