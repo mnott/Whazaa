@@ -558,9 +558,13 @@ function findItermSessionForTermId(
   termSessionId: string,
   itermSessionIdHint?: string
 ): string | null {
-  // If the client passed its ITERM_SESSION_ID directly, trust it
+  // If the client passed its ITERM_SESSION_ID directly, trust it.
+  // ITERM_SESSION_ID can be "UUID" or "w0t2p0:UUID" — strip any prefix
+  // before the colon because AppleScript's `id of aSession` returns just
+  // the bare UUID.
   if (itermSessionIdHint) {
-    return itermSessionIdHint;
+    const colonIdx = itermSessionIdHint.lastIndexOf(":");
+    return colonIdx >= 0 ? itermSessionIdHint.slice(colonIdx + 1) : itermSessionIdHint;
   }
 
   // Otherwise scan all iTerm2 sessions for a matching TERM_SESSION_ID
@@ -1630,10 +1634,18 @@ async function handleScreenshot(): Promise<void> {
     //   3. Auto-discover from live Claude sessions (handles cold start / post-restart)
     //   4. Fall back to window 1 (last resort)
     let windowId: string;
+    let windowBounds: string = "";
     try {
       const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
-      // Prefer registry itermSessionId; fall back to the module-level activeItermSessionId
-      let itermSessionId = activeEntry?.itermSessionId ?? (activeItermSessionId || undefined);
+      // Prefer registry itermSessionId; fall back to the module-level activeItermSessionId.
+      // Strip any "w0t2p0:"-style prefix from ITERM_SESSION_ID so the bare UUID is used
+      // in AppleScript comparisons (iTerm2's `id of aSession` returns just the UUID).
+      const stripItermPrefix = (id: string | undefined): string | undefined => {
+        if (!id) return id;
+        const colonIdx = id.lastIndexOf(":");
+        return colonIdx >= 0 ? id.slice(colonIdx + 1) : id;
+      };
+      let itermSessionId = stripItermPrefix(activeEntry?.itermSessionId ?? (activeItermSessionId || undefined));
 
       // Auto-discover: if no session is tracked, scan for live Claude sessions
       if (!itermSessionId) {
@@ -1648,8 +1660,11 @@ async function handleScreenshot(): Promise<void> {
       if (itermSessionId) {
         // Single atomic AppleScript: find the session, select its tab, raise
         // its window to the top of all iTerm2 windows, activate iTerm2, and
-        // return the window ID — all using the direct window reference `w`
-        // so there's no chance of targeting the wrong window.
+        // return the window ID AND bounds — all using the direct window
+        // reference `w` so there's no chance of targeting the wrong window.
+        // Returning bounds here (rather than querying System Events later)
+        // eliminates the race where another window becomes frontmost during
+        // the render-wait delay.
         const findAndRaiseScript = `tell application "iTerm2"
   repeat with w in windows
     set tabCount to count of tabs of w
@@ -1663,7 +1678,14 @@ async function handleScreenshot(): Promise<void> {
           set index of w to 1
           -- Bring iTerm2 to the foreground of all applications
           activate
-          return id of w
+          -- Return window ID and bounds atomically so callers don't need
+          -- to query "window 1" (which may change during the render wait)
+          set wBounds to bounds of w
+          set wx to item 1 of wBounds
+          set wy to item 2 of wBounds
+          set wx2 to item 3 of wBounds
+          set wy2 to item 4 of wBounds
+          return (id of w as text) & "\\t" & (wx as text) & "," & (wy as text) & "," & ((wx2 - wx) as text) & "," & ((wy2 - wy) as text)
         end if
       end repeat
     end repeat
@@ -1672,24 +1694,46 @@ async function handleScreenshot(): Promise<void> {
 end tell`;
         const result = runAppleScript(findAndRaiseScript);
         if (result && result !== "") {
-          windowId = result;
+          const tabIdx = result.indexOf("\t");
+          windowId = tabIdx >= 0 ? result.slice(0, tabIdx) : result;
+          windowBounds = tabIdx >= 0 ? result.slice(tabIdx + 1) : "";
           process.stderr.write(`[whazaa-watch] /ss: found session ${itermSessionId} in window ${windowId}, raised and activated\n`);
         } else {
           // Session not found — fall back to frontmost window
           runAppleScript('tell application "iTerm2" to activate');
-          windowId = execSync(
-            'osascript -e \'tell application "iTerm2" to id of window 1\'',
-            { timeout: 10_000 }
-          ).toString().trim();
+          const fallbackScript = `tell application "iTerm2"
+  set w to window 1
+  activate
+  set wBounds to bounds of w
+  set wx to item 1 of wBounds
+  set wy to item 2 of wBounds
+  set wx2 to item 3 of wBounds
+  set wy2 to item 4 of wBounds
+  return (id of w as text) & "\\t" & (wx as text) & "," & (wy as text) & "," & ((wx2 - wx) as text) & "," & ((wy2 - wy) as text)
+end tell`;
+          const fallbackResult = runAppleScript(fallbackScript) ?? "";
+          const tabIdx2 = fallbackResult.indexOf("\t");
+          windowId = tabIdx2 >= 0 ? fallbackResult.slice(0, tabIdx2) : fallbackResult;
+          windowBounds = tabIdx2 >= 0 ? fallbackResult.slice(tabIdx2 + 1) : "";
           process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
         }
       } else {
         // Truly no Claude sessions — activate iTerm2 and use frontmost window
         runAppleScript('tell application "iTerm2" to activate');
-        windowId = execSync(
-          'osascript -e \'tell application "iTerm2" to id of window 1\'',
-          { timeout: 10_000 }
-        ).toString().trim();
+        const fallbackScript = `tell application "iTerm2"
+  set w to window 1
+  activate
+  set wBounds to bounds of w
+  set wx to item 1 of wBounds
+  set wy to item 2 of wBounds
+  set wx2 to item 3 of wBounds
+  set wy2 to item 4 of wBounds
+  return (id of w as text) & "\\t" & (wx as text) & "," & (wy as text) & "," & ((wx2 - wx) as text) & "," & ((wy2 - wy) as text)
+end tell`;
+        const fallbackResult = runAppleScript(fallbackScript) ?? "";
+        const tabIdx3 = fallbackResult.indexOf("\t");
+        windowId = tabIdx3 >= 0 ? fallbackResult.slice(0, tabIdx3) : fallbackResult;
+        windowBounds = tabIdx3 >= 0 ? fallbackResult.slice(tabIdx3 + 1) : "";
         process.stderr.write(`[whazaa-watch] /ss: no Claude sessions found, falling back to window 1 (id=${windowId})\n`);
       }
     } catch {
@@ -1708,21 +1752,12 @@ end tell`;
     // frontmost and the correct tab is selected, macOS will redraw it.
     await new Promise((r) => setTimeout(r, 1500));
 
-    // Capture the frontmost iTerm2 window using screen-region capture (-R).
-    // We cannot use -l (window layer by CGWindowID) because iTerm2's
-    // AppleScript `id of window` returns an internal iTerm2 ID, not the
-    // CGWindowID that screencapture expects. Instead, since we just raised
-    // the correct window to index 1, we get its bounds from System Events
-    // and capture that screen region from the display framebuffer.
-    const boundsScript = `tell application "System Events" to tell process "iTerm2"
-  set w to window 1
-  set {x, y} to position of w
-  set {width, height} to size of w
-  return (x as text) & "," & (y as text) & "," & (width as text) & "," & (height as text)
-end tell`;
-    const bounds = runAppleScript(boundsScript);
+    // Use the bounds captured atomically when the window was raised.
+    // This is safe even if another window becomes frontmost during the wait
+    // because we pinned the position from the exact window reference `w`.
+    const bounds = windowBounds;
     if (!bounds || !bounds.includes(",")) {
-      throw new Error("Could not get window bounds from System Events");
+      throw new Error("Could not get window bounds from iTerm2");
     }
     process.stderr.write(`[whazaa-watch] /ss: capturing screen region ${bounds} (iTerm2 window ${windowId})\n`);
     execSync(`screencapture -x -R ${bounds} "${filePath}"`, { timeout: 15_000 });

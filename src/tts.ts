@@ -134,16 +134,33 @@ export async function textToVoiceNote(
     `[whazaa-tts] Generating audio: voice=${resolvedVoice}, text="${text.slice(0, 60)}${text.length > 60 ? "..." : ""}"\n`
   );
 
-  // Generate audio
-  const audio = await ttsInstance!.generate(text, { voice: resolvedVoice });
+  // Stream audio sentence-by-sentence to avoid the 512 phoneme token limit
+  // that causes silent truncation when using generate() on long texts.
+  const chunks: Float32Array[] = [];
+  let sampleRate = 24_000;
+  let totalSamples = 0;
 
-  // Kokoro returns a RawAudio object with .audio (Float32Array),
-  // .sampling_rate (number), and .toWav() (returns ArrayBuffer)
-  const sampleRate: number = (audio.sampling_rate as number) ?? 24_000;
-  const numSamples: number = (audio.audio as Float32Array).length;
+  for await (const chunk of ttsInstance!.stream(text, { voice: resolvedVoice })) {
+    const chunkAudio = chunk.audio as { audio: Float32Array; sampling_rate: number };
+    sampleRate = chunkAudio.sampling_rate ?? 24_000;
+    chunks.push(chunkAudio.audio);
+    totalSamples += chunkAudio.audio.length;
+  }
+
+  if (chunks.length === 0) {
+    throw new Error("TTS: stream produced no audio chunks");
+  }
+
+  // Concatenate all Float32Array chunks into one
+  const combined = new Float32Array(totalSamples);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
 
   process.stderr.write(
-    `[whazaa-tts] Generated ${numSamples} samples at ${sampleRate} Hz\n`
+    `[whazaa-tts] Generated ${totalSamples} samples at ${sampleRate} Hz (${chunks.length} chunk${chunks.length !== 1 ? "s" : ""})\n`
   );
 
   // Temp file paths
@@ -152,9 +169,8 @@ export async function textToVoiceNote(
   const oggPath = join(tmpdir(), `whazaa-tts-${uid}.ogg`);
 
   try {
-    // Write WAV using the built-in toWav() method
-    const wavArrayBuffer: ArrayBuffer = audio.toWav() as ArrayBuffer;
-    writeFileSync(wavPath, Buffer.from(wavArrayBuffer));
+    // Encode Float32 PCM to WAV (44-byte header + Int16 samples)
+    writeFileSync(wavPath, float32ToWav(combined, sampleRate));
 
     // Convert WAV → OGG Opus via ffmpeg
     // -y: overwrite output
@@ -218,11 +234,30 @@ export async function speakLocally(text: string, voice?: string): Promise<void> 
     `[whazaa-tts] Speaking locally: voice=${resolvedVoice}, text="${text.slice(0, 60)}${text.length > 60 ? "..." : ""}"\n`
   );
 
-  const audio = await ttsInstance!.generate(text, { voice: resolvedVoice });
+  const speakChunks: Float32Array[] = [];
+  let speakSampleRate = 24_000;
+  let speakTotalSamples = 0;
+
+  for await (const chunk of ttsInstance!.stream(text, { voice: resolvedVoice })) {
+    const chunkAudio = chunk.audio as { audio: Float32Array; sampling_rate: number };
+    speakSampleRate = chunkAudio.sampling_rate ?? 24_000;
+    speakChunks.push(chunkAudio.audio);
+    speakTotalSamples += chunkAudio.audio.length;
+  }
+
+  if (speakChunks.length === 0) {
+    throw new Error("TTS: stream produced no audio chunks");
+  }
+
+  const speakCombined = new Float32Array(speakTotalSamples);
+  let speakOffset = 0;
+  for (const chunk of speakChunks) {
+    speakCombined.set(chunk, speakOffset);
+    speakOffset += chunk.length;
+  }
 
   const wavPath = join(tmpdir(), `whazaa-speak-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`);
-  const wavArrayBuffer: ArrayBuffer = audio.toWav() as ArrayBuffer;
-  writeFileSync(wavPath, Buffer.from(wavArrayBuffer));
+  writeFileSync(wavPath, float32ToWav(speakCombined, speakSampleRate));
 
   // Play via afplay (macOS built-in). Detached + unref so the watcher is not
   // blocked waiting for playback to finish.
@@ -243,6 +278,44 @@ export function listVoices(): string[] {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Encode a Float32Array of PCM samples to a WAV file buffer.
+ * Produces a standard 16-bit PCM WAV (RIFF/WAVE, mono, little-endian).
+ */
+function float32ToWav(samples: Float32Array, sampleRate: number): Buffer {
+  const numSamples = samples.length;
+  const byteRate = sampleRate * 2; // 16-bit mono = 2 bytes/sample
+  const dataSize = numSamples * 2;
+  const buf = Buffer.allocUnsafe(44 + dataSize);
+
+  // RIFF header
+  buf.write("RIFF", 0, "ascii");
+  buf.writeUInt32LE(36 + dataSize, 4);
+  buf.write("WAVE", 8, "ascii");
+
+  // fmt chunk
+  buf.write("fmt ", 12, "ascii");
+  buf.writeUInt32LE(16, 16);         // chunk size
+  buf.writeUInt16LE(1, 20);          // PCM format
+  buf.writeUInt16LE(1, 22);          // mono
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(byteRate, 28);
+  buf.writeUInt16LE(2, 32);          // block align (1 ch * 2 bytes)
+  buf.writeUInt16LE(16, 34);         // bits per sample
+
+  // data chunk
+  buf.write("data", 36, "ascii");
+  buf.writeUInt32LE(dataSize, 40);
+
+  // Convert Float32 [-1, 1] to Int16
+  for (let i = 0; i < numSamples; i++) {
+    const clamped = Math.max(-1, Math.min(1, samples[i]));
+    buf.writeInt16LE(Math.round(clamped * 32767), 44 + i * 2);
+  }
+
+  return buf;
+}
 
 /**
  * Resolve a user-supplied voice string to a known KokoroVoice.
