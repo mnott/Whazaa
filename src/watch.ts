@@ -1496,6 +1496,45 @@ function expandTilde(p: string): string {
 }
 
 /**
+ * Handle a /t [command] command received via WhatsApp.
+ * Opens a raw terminal tab in iTerm2 (no Claude). If a command is given, runs it.
+ */
+function handleTerminal(command: string | null): void {
+  process.stderr.write(`[whazaa-watch] /t -> ${command ?? "(plain shell)"}\n`);
+
+  const writeText = command
+    ? `write text "${command.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+    : "";
+
+  const script = `
+tell application "iTerm2"
+  if (count of windows) = 0 then
+    set newWindow to (create window with default profile)
+    set newSession to current session of current tab of newWindow
+    ${writeText}
+    activate
+  else
+    tell current window
+      set newTab to (create tab with default profile)
+      set newSession to current session of newTab
+      ${writeText}
+    end tell
+    activate
+  end if
+end tell`;
+
+  const result = runAppleScript(script);
+  if (result === null) {
+    process.stderr.write("[whazaa-watch] /t: failed to open terminal tab\n");
+    watcherSendMessage("Failed to open terminal tab.").catch(() => {});
+  } else {
+    const msg = command ? `Terminal opened: ${command}` : "Terminal opened";
+    process.stderr.write(`[whazaa-watch] /t: ${msg}\n`);
+    watcherSendMessage(msg).catch(() => {});
+  }
+}
+
+/**
  * Handle a /relocate <path> command received via WhatsApp.
  */
 function handleRelocate(targetPath: string): string | null {
@@ -2675,6 +2714,17 @@ end tell`;
       } else {
         watcherSendMessage("Session not found — it may have closed.").catch(() => {});
       }
+      return;
+    }
+
+    // --- /t [command] (alias: /terminal) — open a raw terminal tab in iTerm2 --
+    if (trimmedText === "/t" || trimmedText === "/terminal") {
+      handleTerminal(null);
+      return;
+    }
+    const terminalMatch = trimmedText.match(/^\/(?:t|terminal)\s+(.+)$/);
+    if (terminalMatch) {
+      handleTerminal(terminalMatch[1].trim());
       return;
     }
 
