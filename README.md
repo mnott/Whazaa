@@ -174,6 +174,8 @@ Works in English, German, and 90+ other languages. Transcription runs entirely o
 
 Send `/ss` from your phone and the watcher captures the active Claude session's iTerm2 window and sends it back to WhatsApp as an image. Useful for checking on long-running tasks without switching to your desk.
 
+The watcher raises the correct window and selects the correct tab before capturing, so you always get the right session — even if iTerm2 is in the background or another window is on top. If no session is tracked yet (e.g. after a watcher restart), it auto-discovers the first live Claude session.
+
 ### Session Management (from Your Phone)
 
 You can control your Claude sessions from WhatsApp itself. Send these commands to your self-chat:
@@ -227,7 +229,7 @@ Sends a message to your self-chat. Supports Markdown formatting converted to Wha
 Optionally send as a TTS voice note by setting the `voice` parameter:
 
 ```
-voice='true'         Use default voice (bm_fable)
+voice='true'         Use the configured default voice
 voice='bm_george'    Use a specific voice
 ```
 
@@ -281,7 +283,7 @@ Default voice: `bm_fable`
 
 Parameters:
 - `message` (required) — text to convert to speech
-- `voice` (optional, default `bm_fable`) — voice name from the table above
+- `voice` (optional) — voice name from the table above; omit to use the configured default
 - `recipient` (optional) — phone number, JID, or contact name; omit for self-chat
 
 ### whatsapp_speak
@@ -290,7 +292,7 @@ Same TTS engine as `whatsapp_tts`, but plays audio through the Mac's speakers in
 
 Parameters:
 - `message` (required) — text to speak aloud
-- `voice` (optional, default `bm_fable`) — voice name (same list as `whatsapp_tts`)
+- `voice` (optional) — voice name (same list as `whatsapp_tts`); omit to use the configured default
 
 ### whatsapp_voice_config
 
@@ -393,6 +395,24 @@ After relocating, subsequent messages are delivered to the new session.
 Reply `/s` to get a numbered list of open Claude sessions with their working directories and names. The currently active session is marked with `*`.
 
 Switch to a session with `/1`, `/2`, etc. Switch and rename in one step with `/1 My Project`. Session names are stored as iTerm2 session variables and persist across watcher restarts.
+
+### /ss (screenshot)
+
+```
+/ss
+/screenshot
+```
+
+Captures the active Claude session's iTerm2 window and sends it back as a WhatsApp image. The watcher finds the session, selects its tab, raises its window to the foreground, waits for macOS to redraw, then captures the screen region.
+
+Session resolution for screenshots follows this priority:
+
+1. **MCP registry** — the session registered by the active MCP client (most precise)
+2. **Active session** — set by `/N` switch commands
+3. **Auto-discover** — scans iTerm2 for any session running Claude
+4. **Frontmost window** — last resort if no Claude sessions exist
+
+If you have multiple Claude sessions, use `/s` then `/N` to select the one you want before taking a screenshot.
 
 ### /kill
 
