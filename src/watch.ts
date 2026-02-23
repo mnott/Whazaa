@@ -170,6 +170,60 @@ function dispatchIncomingMessage(body: string, timestamp: number): void {
 /** The active Baileys socket — null when disconnected */
 let watcherSock: ReturnType<typeof makeWASocket> | null = null;
 
+// ---------------------------------------------------------------------------
+// Typing indicator (composing presence)
+// ---------------------------------------------------------------------------
+
+/** Interval handle for the typing indicator refresh loop */
+let typingInterval: ReturnType<typeof setInterval> | null = null;
+
+/** JID to send typing presence to — updated when composing starts */
+let typingTargetJid: string | null = null;
+
+/**
+ * Start showing the "typing..." indicator on WhatsApp for the given JID.
+ * Sends a "composing" presence update immediately and refreshes every 6 seconds
+ * because WhatsApp expires the composing state after ~10 seconds.
+ *
+ * Safe to call repeatedly — stops any existing indicator before starting a new one.
+ */
+function startTypingIndicator(jid: string): void {
+  stopTypingIndicator();
+  if (!watcherSock || !watcherStatus.connected) return;
+
+  typingTargetJid = jid;
+
+  const sendComposing = (): void => {
+    if (!watcherSock || !watcherStatus.connected || !typingTargetJid) return;
+    watcherSock.sendPresenceUpdate("composing", typingTargetJid).catch((err: unknown) => {
+      process.stderr.write(`[whazaa-watch] typing indicator error: ${err}\n`);
+    });
+  };
+
+  sendComposing();
+  typingInterval = setInterval(sendComposing, 6000);
+}
+
+/**
+ * Stop the typing indicator. Clears the refresh interval and sends a
+ * "paused" presence update so the indicator disappears immediately.
+ */
+function stopTypingIndicator(): void {
+  if (typingInterval) {
+    clearInterval(typingInterval);
+    typingInterval = null;
+  }
+
+  const jid = typingTargetJid;
+  typingTargetJid = null;
+
+  if (jid && watcherSock && watcherStatus.connected) {
+    watcherSock.sendPresenceUpdate("paused", jid).catch((err: unknown) => {
+      process.stderr.write(`[whazaa-watch] typing indicator stop error: ${err}\n`);
+    });
+  }
+}
+
 /**
  * Lightweight chat store: populated by chats.upsert / chats.update / chats.delete events.
  * Keyed by JID. WhatsApp pushes ~100-150 recent chats on connect with syncFullHistory:false.
@@ -335,6 +389,42 @@ let watcherStatus = {
 const sentMessageIds = new Set<string>();
 
 // ---------------------------------------------------------------------------
+// MIME type map for file sending
+// ---------------------------------------------------------------------------
+
+const MIME_MAP: Record<string, string> = {
+  // Documents
+  ".pdf": "application/pdf",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+  ".zip": "application/zip",
+  ".json": "application/json",
+  // Images
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  // Video
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".avi": "video/x-msvideo",
+  ".mkv": "video/x-matroska",
+  // Audio
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".m4a": "audio/mp4",
+};
+
+// ---------------------------------------------------------------------------
 // Contact and JID helpers
 // ---------------------------------------------------------------------------
 
@@ -459,6 +549,10 @@ async function watcherSendMessage(message: string, recipient?: string): Promise<
   }
 
   const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+
+  // Stop the typing indicator before sending — Claude is done thinking.
+  stopTypingIndicator();
+
   const text = markdownToWhatsApp(message);
   const result = await watcherSock.sendMessage(targetJid, { text });
 
@@ -774,6 +868,88 @@ async function handleRequest(
         const preview = await watcherSendMessage(message, recipient);
         const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
         sendResponse(socket, { id, ok: true, result: { preview, targetJid } });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendResponse(socket, { id, ok: false, error: msg });
+      }
+      socket.end();
+      break;
+    }
+
+    case "send_file": {
+      const filePath = params.filePath != null ? String(params.filePath) : "";
+      if (!filePath) {
+        sendResponse(socket, { id, ok: false, error: "filePath is required" });
+        socket.end();
+        break;
+      }
+
+      if (!existsSync(filePath)) {
+        sendResponse(socket, { id, ok: false, error: `File not found: ${filePath}` });
+        socket.end();
+        break;
+      }
+
+      if (!watcherSock) {
+        sendResponse(socket, { id, ok: false, error: "WhatsApp socket not initialized. Is the watcher connected?" });
+        socket.end();
+        break;
+      }
+      if (!watcherStatus.connected) {
+        sendResponse(socket, { id, ok: false, error: "WhatsApp is not connected. Check status with whatsapp_status." });
+        socket.end();
+        break;
+      }
+      if (!watcherStatus.selfJid) {
+        sendResponse(socket, { id, ok: false, error: "Self JID not yet known. Wait for connection to fully open." });
+        socket.end();
+        break;
+      }
+
+      const fileRecipient = params.recipient != null ? String(params.recipient) : undefined;
+      const fileCaption = params.caption != null ? String(params.caption) : undefined;
+      const targetJidFile = fileRecipient ? resolveRecipient(fileRecipient) : watcherStatus.selfJid;
+
+      try {
+        const fileBuffer = readFileSync(filePath);
+        const fileName = basename(filePath);
+        const ext = fileName.includes(".") ? "." + fileName.split(".").pop()!.toLowerCase() : "";
+        const mimetype = MIME_MAP[ext] ?? "application/octet-stream";
+
+        let sendContent: Record<string, unknown>;
+        if (mimetype.startsWith("image/")) {
+          sendContent = { image: fileBuffer, ...(fileCaption !== undefined && { caption: fileCaption }) };
+        } else if (mimetype.startsWith("video/")) {
+          sendContent = { video: fileBuffer, ...(fileCaption !== undefined && { caption: fileCaption }) };
+        } else if (mimetype.startsWith("audio/")) {
+          sendContent = { audio: fileBuffer, mimetype, ptt: false };
+        } else {
+          sendContent = { document: fileBuffer, mimetype, fileName, ...(fileCaption !== undefined && { caption: fileCaption }) };
+        }
+
+        stopTypingIndicator();
+        const result = await watcherSock.sendMessage(targetJidFile, sendContent as Parameters<typeof watcherSock.sendMessage>[1]);
+
+        if (result?.key?.id) {
+          const msgId = result.key.id;
+          sentMessageIds.add(msgId);
+          setTimeout(() => sentMessageIds.delete(msgId), 30_000);
+        }
+
+        // Track outbound contact (non-self only)
+        if (targetJidFile !== watcherStatus.selfJid) {
+          trackContact(targetJidFile, null, Date.now());
+        }
+
+        sendResponse(socket, {
+          id,
+          ok: true,
+          result: {
+            fileName,
+            fileSize: fileBuffer.length,
+            targetJid: targetJidFile,
+          },
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         sendResponse(socket, { id, ok: false, error: msg });
@@ -1275,20 +1451,17 @@ function runAppleScript(script: string): string | null {
 }
 
 /**
- * Type text into a specific iTerm2 session and press Enter.
- * Returns true if the session was found and text was typed.
+ * Send a single ASCII keystroke to a specific iTerm2 session (no newline).
+ * Returns true if the session was found and the keystroke was delivered.
  */
-function typeIntoSession(sessionId: string, text: string): boolean {
-  const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-
+function sendKeystrokeToSession(sessionId: string, asciiCode: number): boolean {
   const script = `
 tell application "iTerm2"
   repeat with aWindow in windows
     repeat with aTab in tabs of aWindow
       repeat with aSession in sessions of aTab
         if id of aSession is "${sessionId}" then
-          tell aSession to write text "${escaped}" newline no
-          tell aSession to write text (ASCII character 13) newline no
+          tell aSession to write text (ASCII character ${asciiCode}) newline no
           return "ok"
         end if
       end repeat
@@ -1299,6 +1472,61 @@ end tell`;
 
   const result = runAppleScript(script);
   return result === "ok";
+}
+
+/**
+ * Send a terminal escape sequence (arrow keys etc.) to a specific iTerm2 session.
+ * `dirChar` is the ANSI direction character: A=up, B=down, C=right, D=left.
+ * Returns true if the session was found and the sequence was delivered.
+ */
+function sendEscapeSequenceToSession(sessionId: string, dirChar: string): boolean {
+  const script = `
+tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${sessionId}" then
+          tell aSession to write text (ASCII character 27) & "[${dirChar}" newline no
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not_found"
+end tell`;
+
+  const result = runAppleScript(script);
+  return result === "ok";
+}
+
+/**
+ * Type text into a specific iTerm2 session and press Enter.
+ * Returns true if the session was found and text was typed.
+ */
+function typeIntoSession(sessionId: string, text: string): boolean {
+  const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+  const textScript = `
+tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${sessionId}" then
+          tell aSession to write text "${escaped}" newline no
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not_found"
+end tell`;
+
+  const result = runAppleScript(textScript);
+  if (result !== "ok") return false;
+
+  // Send Enter as a separate call so long text paste can't timeout before Enter fires
+  sendKeystrokeToSession(sessionId, 13);
+  return true;
 }
 
 /**
@@ -2009,6 +2237,53 @@ end tell`;
   process.stderr.write(`[whazaa-watch] /kill: restarted Claude in session ${target.id}\n`);
 }
 
+/**
+ * Handle /k for a plain terminal session: send Ctrl+C, close the tab, clean up.
+ */
+async function handleKillTerminalSession(
+  target: { id: string; name: string; path: string; type: "claude" | "terminal" }
+): Promise<void> {
+  await watcherSendMessage(`Closing terminal session "${target.name}"...`).catch(() => {});
+  process.stderr.write(`[whazaa-watch] /kill: closing terminal session ${target.id} ("${target.name}")\n`);
+
+  // Send Ctrl+C to interrupt any running process
+  sendKeystrokeToSession(target.id, 3);
+
+  // Brief pause to let the process react
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Close the iTerm2 tab containing this session
+  const closeScript = `
+tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${target.id}" then
+          close aTab
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not_found"
+end tell`;
+
+  const result = runAppleScript(closeScript);
+  if (result !== "ok") {
+    process.stderr.write(`[whazaa-watch] /kill: could not close tab for session ${target.id} (result: ${result})\n`);
+  }
+
+  // Remove from managedSessions registry
+  managedSessions.delete(target.id);
+
+  // If this was the active session, clear it so the user must re-select
+  if (activeItermSessionId === target.id) {
+    activeItermSessionId = "";
+  }
+
+  await watcherSendMessage(`Closed terminal session *${target.name}*`).catch(() => {});
+}
+
 // ---------------------------------------------------------------------------
 // Image download helper
 // ---------------------------------------------------------------------------
@@ -2385,6 +2660,7 @@ async function connectWatcher(
       if (connection === "close") {
         watcherStatus.connected = false;
         connStatus.connected = false;
+        stopTypingIndicator();
         watcherSock = null;
         sock = null;
 
@@ -2810,13 +3086,127 @@ end tell`;
       return;
     }
 
-    // --- /kill N (alias: /k N) — kill a stuck Claude session and restart it --
+    // =========================================================================
+    // Keyboard control commands — send keystrokes to the active iTerm2 session
+    // =========================================================================
+    // These commands do NOT forward text to Claude; they inject raw keystrokes
+    // directly into the active session so the user can control interactive TUIs,
+    // navigate menus, cancel operations, etc. from WhatsApp.
+    //
+    //   /cc     — Ctrl+C  (interrupt)
+    //   /esc    — Escape
+    //   /enter  — Enter / Return
+    //   /tab    — Tab (completion)
+    //   /up     — Up arrow
+    //   /down   — Down arrow
+    //   /left   — Left arrow
+    //   /right  — Right arrow
+    //   /pick N — Navigate down (N-1) times then press Enter (menu selection)
+    // =========================================================================
+
+    if (
+      trimmedText === "/cc" ||
+      trimmedText === "/esc" ||
+      trimmedText === "/enter" ||
+      trimmedText === "/tab" ||
+      trimmedText === "/up" ||
+      trimmedText === "/down" ||
+      trimmedText === "/left" ||
+      trimmedText === "/right" ||
+      /^\/pick\s+(\d+)$/.test(trimmedText)
+    ) {
+      if (!activeItermSessionId) {
+        watcherSendMessage("No active session. Use /s to list and /N to select.").catch(() => {});
+        return;
+      }
+
+      if (trimmedText === "/cc") {
+        sendKeystrokeToSession(activeItermSessionId, 3);
+        watcherSendMessage("Ctrl+C sent").catch(() => {});
+        return;
+      }
+
+      if (trimmedText === "/esc") {
+        sendKeystrokeToSession(activeItermSessionId, 27);
+        watcherSendMessage("Esc sent").catch(() => {});
+        return;
+      }
+
+      if (trimmedText === "/enter") {
+        sendKeystrokeToSession(activeItermSessionId, 13);
+        watcherSendMessage("Enter sent").catch(() => {});
+        return;
+      }
+
+      if (trimmedText === "/tab") {
+        sendKeystrokeToSession(activeItermSessionId, 9);
+        watcherSendMessage("Tab sent").catch(() => {});
+        return;
+      }
+
+      if (trimmedText === "/up") {
+        sendEscapeSequenceToSession(activeItermSessionId, "A");
+        watcherSendMessage("↑").catch(() => {});
+        return;
+      }
+
+      if (trimmedText === "/down") {
+        sendEscapeSequenceToSession(activeItermSessionId, "B");
+        watcherSendMessage("↓").catch(() => {});
+        return;
+      }
+
+      if (trimmedText === "/left") {
+        sendEscapeSequenceToSession(activeItermSessionId, "D");
+        watcherSendMessage("←").catch(() => {});
+        return;
+      }
+
+      if (trimmedText === "/right") {
+        sendEscapeSequenceToSession(activeItermSessionId, "C");
+        watcherSendMessage("→").catch(() => {});
+        return;
+      }
+
+      const pickMatch = trimmedText.match(/^\/pick\s+(\d+)(?:\s+(.+))?$/);
+      if (pickMatch) {
+        const pickNum = parseInt(pickMatch[1], 10);
+        const pickText = pickMatch[2] || null;
+        if (pickNum < 1) {
+          watcherSendMessage("Pick number must be at least 1.").catch(() => {});
+          return;
+        }
+        // Send down arrow (N-1) times from current position, then Enter
+        const sessionId = activeItermSessionId;
+        (async () => {
+          for (let i = 0; i < pickNum - 1; i++) {
+            sendEscapeSequenceToSession(sessionId, "B");
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          sendKeystrokeToSession(sessionId, 13);
+
+          if (pickText) {
+            // Wait briefly for input field to appear
+            await new Promise((r) => setTimeout(r, 200));
+            typeIntoSession(sessionId, pickText);
+          }
+
+          const msgText = pickText ? `Picked option ${pickNum}: ${pickText}` : `Picked option ${pickNum}`;
+          watcherSendMessage(msgText).catch(() => {});
+        })().catch((err) => {
+          process.stderr.write(`[whazaa-watch] /pick: error — ${err}\n`);
+        });
+        return;
+      }
+    }
+
+    // --- /kill N (alias: /k N) — kill a stuck session (Claude or terminal) --
     const killMatch = trimmedText.match(/^\/(?:kill|k)\s+(\d+)$/);
     if (killMatch) {
       const num = parseInt(killMatch[1], 10);
-      const sessions = listClaudeSessions();
+      const sessions = getSessionList();
       if (sessions.length === 0) {
-        watcherSendMessage("No Claude sessions found.").catch(() => {});
+        watcherSendMessage("No sessions found.").catch(() => {});
         return;
       }
       if (num < 1 || num > sessions.length) {
@@ -2824,9 +3214,15 @@ end tell`;
         return;
       }
       const target = sessions[num - 1];
-      handleKillSession(target).catch((err) => {
-        process.stderr.write(`[whazaa-watch] /kill: unhandled error — ${err}\n`);
-      });
+      if (target.type === "terminal") {
+        handleKillTerminalSession(target).catch((err) => {
+          process.stderr.write(`[whazaa-watch] /kill: unhandled error — ${err}\n`);
+        });
+      } else {
+        handleKillSession(target).catch((err) => {
+          process.stderr.write(`[whazaa-watch] /kill: unhandled error — ${err}\n`);
+        });
+      }
       return;
     }
 
@@ -2834,7 +3230,13 @@ end tell`;
     dispatchIncomingMessage(text, timestamp);
 
     // Deliver to iTerm2 (always)
-    deliverMessage(text);
+    const delivered = deliverMessage(text);
+
+    // Show typing indicator so the user sees Claude is processing.
+    // Only start if delivery succeeded — no point indicating if nothing was typed.
+    if (delivered && watcherStatus.selfJid) {
+      startTypingIndicator(watcherStatus.selfJid);
+    }
   }
 
   /**

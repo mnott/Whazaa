@@ -2,7 +2,7 @@
 
 Your phone is now a Claude Code terminal. Send a WhatsApp message, Claude gets it. Claude responds, you see it on WhatsApp. Text, images, voice notes — in both directions.
 
-Dictate a voice note while driving and Claude starts coding. Send an image from your phone and Claude interprets it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Take complete control of your computer using `/t` to open and manage any number of terminal sessions. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh. Take screenshots of any session using `/ss` and have the screenshot sent to you via WhatsApp.
+Dictate a voice note while driving and Claude starts coding. Send an image from your phone and Claude interprets it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Take complete control of your computer using `/t` to open and manage any number of terminal sessions. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh. Navigate interactive TUIs, menus, and shell prompts from your phone using keyboard control commands like `/cc`, `/esc`, `/up`, `/down`, and `/pick N`. Take screenshots of any session using `/ss` and have the screenshot sent to you via WhatsApp.
 
 One command to set up. Zero cloud dependencies for voice. Works with any WhatsApp account.
 
@@ -376,7 +376,13 @@ Certain messages sent from your phone are intercepted by the watcher and handled
 | `/t` or `/t <command>` | Open a plain terminal tab (no Claude); optionally run a command |
 | `/sessions` or `/s` | List open sessions (Claude and terminal) with names; reply `/N` to switch, `/N name` to switch and rename |
 | `/ss` or `/screenshot` | Capture the active Claude session's iTerm2 window and send it back as an image |
-| `/kill N` or `/k N` | Kill a stuck Claude session and restart it fresh in the same directory |
+| `/kill N` or `/k N` | Kill a stuck session (Claude: restarts it; terminal: closes the tab) |
+| `/cc` | Send Ctrl+C to the active session (interrupt) |
+| `/esc` | Send Escape to the active session |
+| `/enter` | Send Enter/Return to the active session |
+| `/tab` | Send Tab to the active session (trigger completion) |
+| `/up` `/down` `/left` `/right` | Send arrow keys to the active session |
+| `/pick N` | Select menu option N: send down arrow (N-1) times then Enter |
 | _(image)_ | Send an image — the watcher downloads it and types the path into Claude |
 | _(voice note)_ | Send a voice note — the watcher transcribes it with Whisper and types the text into Claude |
 
@@ -436,9 +442,40 @@ If you have multiple Claude sessions, use `/s` then `/N` to select the one you w
 /k 2
 ```
 
-Kill a stuck Claude session (e.g. one that ran out of context and is unresponsive) and restart it. The watcher finds the Claude process via the session's TTY, sends SIGTERM, waits for the shell prompt to return, then types `claude` to restart in the same directory.
+Kill a session by its number from `/s`. Behavior depends on session type:
+
+- **Claude session** — sends SIGTERM to the Claude process, waits for the shell prompt to return, then types `claude` to restart in the same directory.
+- **Terminal session** — sends Ctrl+C to interrupt any running process, then closes the iTerm2 tab and removes it from the session list.
 
 Use `/s` first to see which number corresponds to which session.
+
+### Keyboard control
+
+Send raw keystrokes to the active iTerm2 session without forwarding text to Claude. Useful for controlling interactive TUIs, navigating menus, and cancelling operations from your phone.
+
+| Command | Keystroke | Use case |
+|---------|-----------|----------|
+| `/cc` | Ctrl+C | Interrupt a running process |
+| `/esc` | Escape | Dismiss a dialog, exit a mode |
+| `/enter` | Return | Confirm a prompt |
+| `/tab` | Tab | Trigger shell completion |
+| `/up` | Up arrow | Previous history item / menu up |
+| `/down` | Down arrow | Next history item / menu down |
+| `/left` | Left arrow | Move cursor left |
+| `/right` | Right arrow | Move cursor right |
+| `/pick N` | Down×(N-1) + Enter | Select the Nth option in a menu |
+
+**Example — navigate a fuzzy finder:**
+
+```
+/down
+/down
+/pick 3
+```
+
+`/pick 3` is equivalent to pressing down twice then Enter — it selects the third item in any numbered or navigable list.
+
+All keyboard commands require an active session. If none is set, the watcher replies with a prompt to use `/s` and `/N`.
 
 ### Image forwarding
 

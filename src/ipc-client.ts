@@ -130,6 +130,12 @@ export interface SpeakResult {
   error?: string;
 }
 
+export interface SendFileResult {
+  fileName: string;
+  fileSize: number;
+  targetJid: string;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -250,6 +256,14 @@ export class WatcherClient {
     const params: Record<string, unknown> = { action, ...updates };
     const result = await this.call("voice_config", params);
     return result as unknown as VoiceConfigResult;
+  }
+
+  async sendFile(filePath: string, recipient?: string, caption?: string): Promise<SendFileResult> {
+    const params: Record<string, unknown> = { filePath };
+    if (recipient !== undefined) params.recipient = recipient;
+    if (caption !== undefined) params.caption = caption;
+    const result = await this.call("send_file", params);
+    return result as unknown as SendFileResult;
   }
 
   async speak(text: string, voice?: string): Promise<SpeakResult> {
