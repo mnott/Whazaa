@@ -1634,43 +1634,24 @@ async function handleScreenshot(): Promise<void> {
       const itermSessionId = activeEntry?.itermSessionId ?? (activeItermSessionId || undefined);
 
       if (itermSessionId) {
-        // Step 1: Select the tab, bring the window to front, activate iTerm2.
-        // IMPORTANT: NO delay inside the AppleScript — a delay inside a
-        // `tell application` block can hold an Apple Events transaction open
-        // and prevent iTerm2 from processing its render queue.
-        const switchScript = `tell application "iTerm2"
+        // Single atomic AppleScript: find the session, select its tab, raise
+        // its window to the top of all iTerm2 windows, activate iTerm2, and
+        // return the CGWindowID — all using the direct window reference `w`
+        // so there's no chance of targeting the wrong window.
+        const findAndRaiseScript = `tell application "iTerm2"
   repeat with w in windows
     set tabCount to count of tabs of w
     repeat with tabIdx from 1 to tabCount
       set t to tab tabIdx of w
       repeat with s in sessions of t
         if id of s is "${itermSessionId}" then
+          -- Select the correct tab (handles multi-tab windows)
           select t
-          set frontmost of w to true
+          -- Raise THIS window to the top of all iTerm2 windows
+          set index of w to 1
+          -- Bring iTerm2 to the foreground of all applications
           activate
-          return "ok"
-        end if
-      end repeat
-    end repeat
-  end repeat
-  return ""
-end tell`;
-
-        const switchResult = runAppleScript(switchScript);
-        if (!switchResult || switchResult !== "ok") {
-          // Session UUID not found — fall back to window 1
-          windowId = execSync(
-            'osascript -e \'tell application "iTerm2" to id of window 1\'',
-            { timeout: 10_000 }
-          ).toString().trim();
-          process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
-        } else {
-          // Step 3: Get the window ID in a separate AppleScript call.
-          const idScript = `tell application "iTerm2"
-  repeat with w in windows
-    repeat with t in tabs of w
-      repeat with s in sessions of t
-        if id of s is "${itermSessionId}" then
+          -- Return the CGWindowID for screencapture
           return id of w
         end if
       end repeat
@@ -1678,20 +1659,21 @@ end tell`;
   end repeat
   return ""
 end tell`;
-          const found = runAppleScript(idScript);
-          if (found && found !== "") {
-            windowId = found;
-            process.stderr.write(`[whazaa-watch] /ss: using window ${windowId} (from iTerm session ${itermSessionId})\n`);
-          } else {
-            windowId = execSync(
-              'osascript -e \'tell application "iTerm2" to id of window 1\'',
-              { timeout: 10_000 }
-            ).toString().trim();
-            process.stderr.write(`[whazaa-watch] /ss: session vanished after switch, falling back to window 1 (id=${windowId})\n`);
-          }
+        const result = runAppleScript(findAndRaiseScript);
+        if (result && result !== "") {
+          windowId = result;
+          process.stderr.write(`[whazaa-watch] /ss: found session ${itermSessionId} in window ${windowId}, raised and activated\n`);
+        } else {
+          // Session not found — fall back to frontmost window
+          runAppleScript('tell application "iTerm2" to activate');
+          windowId = execSync(
+            'osascript -e \'tell application "iTerm2" to id of window 1\'',
+            { timeout: 10_000 }
+          ).toString().trim();
+          process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
         }
       } else {
-        // No active session known — activate iTerm2 and fall back to window 1
+        // No active session known — activate iTerm2 and use frontmost window
         runAppleScript('tell application "iTerm2" to activate');
         windowId = execSync(
           'osascript -e \'tell application "iTerm2" to id of window 1\'',
@@ -1709,30 +1691,15 @@ end tell`;
       return;
     }
 
-    // Step 2: Raise the specific window to the very front.
-    // The switchScript's `set frontmost of w to true` + `activate` isn't
-    // always reliable with multiple iTerm2 windows. Setting `index to 1`
-    // explicitly makes this window the topmost iTerm2 window, and a second
-    // `activate` ensures iTerm2 itself is the frontmost application.
-    try {
-      runAppleScript(`tell application "iTerm2"
-  set index of window id ${windowId} to 1
-  activate
-end tell`);
-    } catch {
-      // Best-effort — the switchScript already tried to raise it
-    }
-
-    // Step 3: Wait for iTerm2 to fully redraw after being raised.
+    // Wait for iTerm2 to fully redraw after being raised.
     // When iTerm2 was in the background, macOS throttles rendering and the
     // window server holds a stale buffer. Now that the specific window is
-    // frontmost, macOS will redraw it. We wait for that to complete.
+    // frontmost and the correct tab is selected, macOS will redraw it.
     await new Promise((r) => setTimeout(r, 1500));
 
-    // Step 4: Capture the specific window by its CGWindowID.
-    // Using -l ensures we capture exactly the right window even if another
-    // window overlaps. The buffer is now fresh because we raised and
-    // activated the window in steps 2-3.
+    // Capture the specific window by its CGWindowID.
+    // Using -l captures exactly this window. The buffer is fresh because
+    // we raised the window and waited for the redraw above.
     process.stderr.write(`[whazaa-watch] /ss: capturing window id ${windowId}\n`);
     execSync(`screencapture -x -o -l ${windowId} "${filePath}"`, { timeout: 15_000 });
 
