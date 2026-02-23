@@ -1641,7 +1641,6 @@ async function handleScreenshot(): Promise<void> {
     //   3. Auto-discover from live Claude sessions (handles cold start / post-restart)
     //   4. Fall back to window 1 (last resort)
     let windowId: string;
-    let windowBounds: string = "";
     try {
       const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
       // Prefer registry itermSessionId; fall back to the module-level activeItermSessionId.
@@ -1665,13 +1664,16 @@ async function handleScreenshot(): Promise<void> {
       }
 
       if (itermSessionId) {
-        // Single atomic AppleScript: find the session, select its tab, raise
-        // its window to the top of all iTerm2 windows, activate iTerm2, and
-        // return the window ID AND bounds — all using the direct window
-        // reference `w` so there's no chance of targeting the wrong window.
-        // Returning bounds here (rather than querying System Events later)
-        // eliminates the race where another window becomes frontmost during
-        // the render-wait delay.
+        // Two-phase AppleScript approach for reliable multi-tab screenshots:
+        //
+        // Phase 1: Find the session, switch to its tab using the correct
+        //   iTerm2 API (set current tab of w to t), raise the window, and
+        //   activate iTerm2. Return only the window ID so we don't capture
+        //   bounds before the tab has actually switched and re-rendered.
+        //
+        // Phase 2: After a render-wait delay, re-read the window bounds by
+        //   its ID. This ensures the bounds reflect the correct tab's layout
+        //   (which may differ in height if tabs have different terminal sizes).
         const findAndRaiseScript = `tell application "iTerm2"
   repeat with w in windows
     set tabCount to count of tabs of w
@@ -1679,49 +1681,37 @@ async function handleScreenshot(): Promise<void> {
       set t to tab tabIdx of w
       repeat with s in sessions of t
         if id of s is "${itermSessionId}" then
-          -- Select the correct tab (handles multi-tab windows)
-          select t
+          -- Switch to the correct tab using the proper iTerm2 API.
+          -- "select t" does NOT reliably switch the visible tab in a multi-tab
+          -- window; "set current tab of w to t" is the correct command.
+          set current tab of w to t
           -- Raise THIS window to the top of all iTerm2 windows
           set index of w to 1
           -- Bring iTerm2 to the foreground of all applications
           activate
-          -- Return window ID and bounds atomically so callers don't need
-          -- to query "window 1" (which may change during the render wait)
-          set wBounds to bounds of w
-          set wx to item 1 of wBounds
-          set wy to item 2 of wBounds
-          set wx2 to item 3 of wBounds
-          set wy2 to item 4 of wBounds
-          return (id of w as text) & "\\t" & (wx as text) & "," & (wy as text) & "," & ((wx2 - wx) as text) & "," & ((wy2 - wy) as text)
+          -- Return only the window ID; bounds are read after the render delay
+          -- so they reflect the actual tab layout, not a pre-switch state.
+          return (id of w as text)
         end if
       end repeat
     end repeat
   end repeat
   return ""
 end tell`;
-        const result = runAppleScript(findAndRaiseScript);
-        if (result && result !== "") {
-          const tabIdx = result.indexOf("\t");
-          windowId = tabIdx >= 0 ? result.slice(0, tabIdx) : result;
-          windowBounds = tabIdx >= 0 ? result.slice(tabIdx + 1) : "";
-          process.stderr.write(`[whazaa-watch] /ss: found session ${itermSessionId} in window ${windowId}, raised and activated\n`);
+        const findResult = runAppleScript(findAndRaiseScript);
+        if (findResult && findResult !== "") {
+          windowId = findResult.trim();
+          process.stderr.write(`[whazaa-watch] /ss: found session ${itermSessionId} in window ${windowId}, tab switched and activated\n`);
         } else {
           // Session not found — fall back to frontmost window
           runAppleScript('tell application "iTerm2" to activate');
           const fallbackScript = `tell application "iTerm2"
   set w to window 1
   activate
-  set wBounds to bounds of w
-  set wx to item 1 of wBounds
-  set wy to item 2 of wBounds
-  set wx2 to item 3 of wBounds
-  set wy2 to item 4 of wBounds
-  return (id of w as text) & "\\t" & (wx as text) & "," & (wy as text) & "," & ((wx2 - wx) as text) & "," & ((wy2 - wy) as text)
+  return (id of w as text)
 end tell`;
           const fallbackResult = runAppleScript(fallbackScript) ?? "";
-          const tabIdx2 = fallbackResult.indexOf("\t");
-          windowId = tabIdx2 >= 0 ? fallbackResult.slice(0, tabIdx2) : fallbackResult;
-          windowBounds = tabIdx2 >= 0 ? fallbackResult.slice(tabIdx2 + 1) : "";
+          windowId = fallbackResult.trim();
           process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
         }
       } else {
@@ -1730,17 +1720,10 @@ end tell`;
         const fallbackScript = `tell application "iTerm2"
   set w to window 1
   activate
-  set wBounds to bounds of w
-  set wx to item 1 of wBounds
-  set wy to item 2 of wBounds
-  set wx2 to item 3 of wBounds
-  set wy2 to item 4 of wBounds
-  return (id of w as text) & "\\t" & (wx as text) & "," & (wy as text) & "," & ((wx2 - wx) as text) & "," & ((wy2 - wy) as text)
+  return (id of w as text)
 end tell`;
         const fallbackResult = runAppleScript(fallbackScript) ?? "";
-        const tabIdx3 = fallbackResult.indexOf("\t");
-        windowId = tabIdx3 >= 0 ? fallbackResult.slice(0, tabIdx3) : fallbackResult;
-        windowBounds = tabIdx3 >= 0 ? fallbackResult.slice(tabIdx3 + 1) : "";
+        windowId = fallbackResult.trim();
         process.stderr.write(`[whazaa-watch] /ss: no Claude sessions found, falling back to window 1 (id=${windowId})\n`);
       }
     } catch {
@@ -1753,16 +1736,32 @@ end tell`;
       return;
     }
 
-    // Wait for iTerm2 to fully redraw after being raised.
+    // Wait for iTerm2 to fully redraw after being raised and the tab switched.
     // When iTerm2 was in the background, macOS throttles rendering and the
-    // window server holds a stale buffer. Now that the specific window is
-    // frontmost and the correct tab is selected, macOS will redraw it.
+    // window server holds a stale buffer. We also need time for the tab switch
+    // to complete — if the new tab has a different terminal size, the window
+    // will resize during this delay.
     await new Promise((r) => setTimeout(r, 1500));
 
-    // Use the bounds captured atomically when the window was raised.
-    // This is safe even if another window becomes frontmost during the wait
-    // because we pinned the position from the exact window reference `w`.
-    const bounds = windowBounds;
+    // Re-read the window bounds AFTER the delay so they reflect the current
+    // tab's layout (the tab may have caused the window to resize).
+    // We look up the window by ID to avoid targeting the wrong window if
+    // another window became frontmost during the wait.
+    const boundsScript = `tell application "iTerm2"
+  repeat with w in windows
+    if (id of w as text) is "${windowId}" then
+      set wBounds to bounds of w
+      set wx to item 1 of wBounds
+      set wy to item 2 of wBounds
+      set wx2 to item 3 of wBounds
+      set wy2 to item 4 of wBounds
+      return (wx as text) & "," & (wy as text) & "," & ((wx2 - wx) as text) & "," & ((wy2 - wy) as text)
+    end if
+  end repeat
+  return ""
+end tell`;
+    const boundsResult = runAppleScript(boundsScript) ?? "";
+    const bounds = boundsResult.trim();
     if (!bounds || !bounds.includes(",")) {
       throw new Error("Could not get window bounds from iTerm2");
     }
