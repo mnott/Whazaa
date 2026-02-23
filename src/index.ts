@@ -10,6 +10,7 @@
  *   whatsapp_receive  — Drain queued incoming messages from your phone
  *   whatsapp_wait     — Long-poll for the next incoming message
  *   whatsapp_login    — Trigger a new QR pairing flow
+ *   whatsapp_rename   — Rename this Claude session (tab title + registry)
  *
  * Architecture: The MCP server is a thin IPC proxy. All WhatsApp operations
  * are forwarded to the watcher daemon (watch.ts) over a Unix Domain Socket
@@ -896,6 +897,41 @@ server.tool(
       }
       return {
         content: [{ type: "text", text: `Speaking aloud (voice: ${result.voice})` }],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_rename
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_rename",
+  "Rename this Claude session. Updates the session name in the watcher registry, the iTerm2 tab title, and the persistent session variable. The new name appears in /s listings and the status bar.",
+  {
+    name: z
+      .string()
+      .min(1)
+      .describe("The new session name (e.g. 'Whazaa Dev', 'API Refactor')"),
+  },
+  async ({ name }) => {
+    try {
+      const result = await watcher.rename(name);
+      if (!result.success) {
+        return {
+          content: [{ type: "text", text: `Error: ${result.error}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `Session renamed to "${result.name}"` }],
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
