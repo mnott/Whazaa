@@ -1,8 +1,8 @@
 # Whazaa
 
-**Your phone is now a Claude Code terminal.** Send a WhatsApp message, Claude gets it. Claude responds, you see it on WhatsApp. Text, images, voice notes — in both directions.
+Your phone is now a Claude Code terminal. Send a WhatsApp message, Claude gets it. Claude responds, you see it on WhatsApp. Text, images, voice notes — in both directions.
 
-Dictate a voice note while driving and Claude starts coding. Send a screenshot from your phone and Claude reads it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh.
+Dictate a voice note while driving and Claude starts coding. Send an image from your phone and Claude interprets it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh.
 
 One command to set up. Zero cloud dependencies for voice. Works with any WhatsApp account.
 
@@ -154,7 +154,7 @@ Claude can look up your WhatsApp conversations directly — it reads from WhatsA
 
 Send an image to your WhatsApp self-chat and Claude sees it. The watcher downloads the image and types the file path into your active Claude session — Claude reads it natively.
 
-- Send a screenshot from your phone with the caption "What's this error?"
+- Send an image from your phone with the caption "What's this error?"
 - Send a photo of a whiteboard with "Transcribe this"
 - Send a design mockup with "Implement this layout"
 
