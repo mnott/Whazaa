@@ -1502,24 +1502,29 @@ function expandTilde(p: string): string {
 function handleTerminal(command: string | null): void {
   process.stderr.write(`[whazaa-watch] /t -> ${command ?? "(plain shell)"}\n`);
 
-  const writeText = command
-    ? `write text "${command.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+  // Open a new tab with a plain shell — NOT Claude.
+  // Optionally run a command in it.
+  const escapedCmd = command
+    ? command.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+    : null;
+
+  const writeBlock = escapedCmd
+    ? `\n    tell newSession\n      write text "${escapedCmd}"\n    end tell`
     : "";
 
   const script = `
 tell application "iTerm2"
   if (count of windows) = 0 then
     set newWindow to (create window with default profile)
-    set newSession to current session of current tab of newWindow
-    ${writeText}
+    set newSession to current session of current tab of newWindow${writeBlock}
     activate
+    return id of newSession
   else
     tell current window
       set newTab to (create tab with default profile)
-      set newSession to current session of newTab
-      ${writeText}
+      set newSession to current session of newTab${writeBlock}
+      return id of newSession
     end tell
-    activate
   end if
 end tell`;
 
@@ -1528,9 +1533,9 @@ end tell`;
     process.stderr.write("[whazaa-watch] /t: failed to open terminal tab\n");
     watcherSendMessage("Failed to open terminal tab.").catch(() => {});
   } else {
-    const msg = command ? `Terminal opened: ${command}` : "Terminal opened";
-    process.stderr.write(`[whazaa-watch] /t: ${msg}\n`);
-    watcherSendMessage(msg).catch(() => {});
+    const label = command ?? "shell";
+    process.stderr.write(`[whazaa-watch] /t: opened terminal (session ${result})${command ? ` running: ${command}` : ""}\n`);
+    watcherSendMessage(`Terminal opened${command ? `: *${command}*` : ""}`).catch(() => {});
   }
 }
 
