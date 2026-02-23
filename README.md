@@ -39,7 +39,15 @@ The separation means you can have multiple Claude Code sessions open simultaneou
 
 ## Quick start
 
-One command does everything:
+Tell Claude Code:
+
+> Clone https://github.com/mnott/Whazaa and set it up for me
+
+Claude clones the repo, finds the setup skill, and handles everything autonomously — prerequisites, build, MCP config, watcher daemon, and WhatsApp pairing. The only thing you do is scan a QR code with your phone when prompted.
+
+### Alternative: npx
+
+If you prefer a traditional install without cloning:
 
 ```bash
 npx -y whazaa setup
