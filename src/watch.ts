@@ -1651,7 +1651,9 @@ async function handleScreenshot(): Promise<void> {
         const colonIdx = id.lastIndexOf(":");
         return colonIdx >= 0 ? id.slice(colonIdx + 1) : id;
       };
-      let itermSessionId = stripItermPrefix(activeEntry?.itermSessionId ?? (activeItermSessionId || undefined));
+      // Prefer activeItermSessionId (explicitly set by /N switch, message delivery,
+      // auto-discovery) over registry lookup — it's always the most up-to-date.
+      let itermSessionId = stripItermPrefix((activeItermSessionId || undefined) ?? activeEntry?.itermSessionId);
 
       // Auto-discover: if no session is tracked, scan for live Claude sessions
       if (!itermSessionId) {
@@ -2596,9 +2598,12 @@ export async function watch(rawSessionId?: string): Promise<void> {
           ?? (regEntry ? regEntry.name : null)
           ?? (s.path ? basename(s.path) : null)
           ?? s.name;
-        const isActive = regEntry
-          ? activeClientId === regEntry.sessionId
-          : s.id === activeItermSessionId;
+        // activeItermSessionId is the single source of truth — always set by
+        // /N switch, message delivery, and auto-discovery.  Only fall back to
+        // activeClientId (registry-based) when no explicit session has been chosen yet.
+        const isActive = activeItermSessionId
+          ? s.id === activeItermSessionId
+          : regEntry ? activeClientId === regEntry.sessionId : false;
         return `${i + 1}. ${label}${isActive ? " \u2190 active" : ""}`;
       });
       const reply = lines.join("\n");
@@ -2647,6 +2652,10 @@ end tell`;
         if (regEntry) {
           activeClientId = regEntry.sessionId;
           process.stderr.write(`[whazaa-watch] /sessions: activeClientId -> ${regEntry.sessionId} ("${regEntry.name}")\n`);
+        } else {
+          // Clear stale activeClientId so it doesn't conflict with activeItermSessionId
+          activeClientId = null;
+          process.stderr.write(`[whazaa-watch] /sessions: activeClientId cleared (no registry entry for ${chosen.id})\n`);
         }
 
         // If a new name was provided, persist it as a session variable and update registry
