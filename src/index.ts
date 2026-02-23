@@ -295,16 +295,18 @@ server.tool(
       .string()
       .optional()
       .describe(
-        "Optional: if set, send message as a TTS voice note using Kokoro. Use 'true' or 'default' for the default voice (bm_fable), or a specific voice name like 'bm_george', 'af_bella', 'af_nova'."
+        "Optional: if set, send message as a TTS voice note using Kokoro. Use 'true' or 'default' for the configured default voice, or a specific voice name like 'bm_george', 'af_bella', 'af_nova'."
       ),
   },
   async ({ message, recipient, voice }) => {
     try {
       // If voice is requested, delegate to TTS IPC method
       if (voice !== undefined && voice !== "") {
+        // "true" and "default" mean "use configured voice" — don't pass a specific voice
+        const explicitVoice = (voice === "true" || voice === "default") ? undefined : voice;
         const result: TtsResult = await watcher.tts({
           text: message,
-          voice: voice,
+          voice: explicitVoice,
           jid: recipient,
         });
         const dest = result.targetJid ?? "self-chat";
@@ -355,9 +357,8 @@ server.tool(
     voice: z
       .string()
       .optional()
-      .default("bm_fable")
       .describe(
-        "Kokoro voice to use (default: 'bm_fable'). Examples: 'af_bella', 'af_nova', 'bm_george', 'bm_daniel', 'bf_emma'."
+        "Kokoro voice to use. Omit to use the configured default voice. Examples: 'af_bella', 'af_nova', 'bm_george', 'bm_daniel', 'bf_emma'."
       ),
     recipient: z
       .string()
