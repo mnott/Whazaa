@@ -2,7 +2,7 @@
 
 Your phone is now a Claude Code terminal. Send a WhatsApp message, Claude gets it. Claude responds, you see it on WhatsApp. Text, images, voice notes — in both directions.
 
-Dictate a voice note while driving and Claude starts coding. Send an image from your phone and Claude interprets it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh.
+Dictate a voice note while driving and Claude starts coding. Send an image from your phone and Claude interprets it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh. Take screenshots of any claude session using `/ss` and have the screenshot sent to you via WhatsApp.
 
 One command to set up. Zero cloud dependencies for voice. Works with any WhatsApp account.
 
