@@ -23,6 +23,7 @@ export const IPC_SOCKET_PATH = "/tmp/whazaa-watcher.sock";
 interface IpcRequest {
   id: string;
   sessionId: string;
+  itermSessionId?: string;
   method: string;
   params: Record<string, unknown>;
 }
@@ -320,6 +321,9 @@ export class WatcherClient {
           method,
           params,
         };
+        // Include ITERM_SESSION_ID so the watcher can auto-register after restarts
+        const itermId = process.env.ITERM_SESSION_ID;
+        if (itermId) request.itermSessionId = itermId;
         socket!.write(JSON.stringify(request) + "\n");
       });
 

@@ -67,6 +67,7 @@ import { listChats } from "./desktop-db.js";
 interface IpcRequest {
   id: string;
   sessionId: string;
+  itermSessionId?: string;
   method: string;
   params: Record<string, unknown>;
 }
@@ -582,7 +583,7 @@ async function watcherSendMessage(message: string, recipient?: string): Promise<
  */
 function setItermSessionVar(itermSessionId: string, name: string): void {
   try {
-    const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\n\r]/g, " ");
     const escapedId = itermSessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     const script = `tell application "iTerm2"
   repeat with aWindow in windows
@@ -591,6 +592,38 @@ function setItermSessionVar(itermSessionId: string, name: string): void {
         if id of aSession is "${escapedId}" then
           tell aSession
             set variable named "user.paiName" to "${escaped}"
+          end tell
+          return
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell`;
+    execSync(`osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`, {
+      timeout: 5000,
+      shell: "/bin/bash",
+    });
+  } catch {
+    // silently ignore
+  }
+}
+
+/**
+ * Set the visible tab/session title in iTerm2 for the given session UUID.
+ * Uses AppleScript `set name to` which overrides the dynamic title until the
+ * shell/process updates it. Silently ignores errors.
+ */
+function setItermTabName(itermSessionId: string, name: string): void {
+  try {
+    const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\n\r]/g, " ");
+    const escapedId = itermSessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const script = `tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${escapedId}" then
+          tell aSession
+            set name to "${escaped}"
           end tell
           return
         end if
@@ -774,6 +807,27 @@ async function handleRequest(
 ): Promise<void> {
   const { id, sessionId, method, params } = request;
 
+  // Auto-register unknown sessions on any IPC call (handles watcher restarts
+  // where the in-memory registry is cleared but MCP clients are still running)
+  if (method !== "register" && sessionId && !sessionRegistry.has(sessionId)) {
+    // Use itermSessionId from the request (new clients), or extract UUID from
+    // TERM_SESSION_ID which has format "w0t2p0:UUID" (same as ITERM_SESSION_ID)
+    const itermHint = request.itermSessionId ?? sessionId;
+    const itermId = findItermSessionForTermId(sessionId, itermHint);
+    const persistedName = itermId ? getItermSessionVar(itermId) : null;
+    const autoName = persistedName ?? "Unknown";
+    sessionRegistry.set(sessionId, {
+      sessionId,
+      name: autoName,
+      itermSessionId: itermId ?? undefined,
+      registeredAt: Date.now(),
+    });
+    if (!clientQueues.has(sessionId)) {
+      clientQueues.set(sessionId, []);
+    }
+    process.stderr.write(`[whazaa-watch] IPC: auto-registered client ${sessionId} (name: "${autoName}", iTerm: ${itermId ?? "unknown"})\n`);
+  }
+
   switch (method) {
     case "register": {
       const name = params.name != null ? String(params.name) : "Unknown";
@@ -792,10 +846,14 @@ async function handleRequest(
         registeredAt: Date.now(),
       });
 
-      if (itermId && !persistedName) {
-        // Only write to iTerm var when there is no pre-existing persisted name;
-        // if persistedName was already there, the var is already correct.
-        setItermSessionVar(itermId, effectiveName);
+      if (itermId) {
+        if (!persistedName) {
+          // Only write to iTerm var when there is no pre-existing persisted name;
+          // if persistedName was already there, the var is already correct.
+          setItermSessionVar(itermId, effectiveName);
+        }
+        // Always set the tab title so new sessions are visibly labelled.
+        setItermTabName(itermId, effectiveName);
       }
 
       // Only claim activeClientId if no session is currently registered, or
@@ -825,6 +883,7 @@ async function handleRequest(
         entry.name = newName;
         if (entry.itermSessionId) {
           setItermSessionVar(entry.itermSessionId, newName);
+          setItermTabName(entry.itermSessionId, newName);
         }
         process.stderr.write(`[whazaa-watch] IPC: renamed session ${sessionId} to "${newName}"\n`);
         sendResponse(socket, { id, ok: true, result: { success: true, name: newName } });
@@ -1940,11 +1999,28 @@ end tell`;
  */
 function getSessionList(): Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> {
   const claudeSessions = listClaudeSessions().map((s) => ({ ...s, type: "claude" as const }));
-  const claudeIds = new Set(claudeSessions.map((s) => s.id));
+  const seenIds = new Set(claudeSessions.map((s) => s.id));
+
+  // Merge registered MCP sessions that weren't found by tab-name scan
+  // (e.g. because the iTerm2 tab was renamed and no longer contains "Claude")
+  for (const [, entry] of sessionRegistry) {
+    if (entry.itermSessionId && !seenIds.has(entry.itermSessionId)) {
+      if (isItermSessionAlive(entry.itermSessionId)) {
+        const paiName = getItermSessionVar(entry.itermSessionId);
+        claudeSessions.push({
+          id: entry.itermSessionId,
+          name: paiName ?? entry.name,
+          path: "",
+          type: "claude" as const,
+        });
+        seenIds.add(entry.itermSessionId);
+      }
+    }
+  }
 
   const terminalSessions: Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> = [];
   for (const [id, entry] of managedSessions) {
-    if (claudeIds.has(id)) {
+    if (seenIds.has(id)) {
       // This terminal tab has since launched Claude — let Claude list pick it up,
       // and remove from managedSessions to avoid duplication.
       managedSessions.delete(id);
@@ -1994,13 +2070,27 @@ async function handleScreenshot(): Promise<void> {
       // auto-discovery) over registry lookup — it's always the most up-to-date.
       let itermSessionId = stripItermPrefix((activeItermSessionId || undefined) ?? activeEntry?.itermSessionId);
 
-      // Auto-discover: if no session is tracked, scan for live Claude sessions
+      // Priority 3: Registry scan — find the most-recently-registered session that
+      // has an iTerm2 UUID. Avoids tab-name matching (which breaks on renamed tabs).
+      if (!itermSessionId) {
+        const registryEntries = [...sessionRegistry.values()]
+          .sort((a, b) => b.registeredAt - a.registeredAt);
+        const newest = registryEntries.find(e => e.itermSessionId);
+        if (newest?.itermSessionId) {
+          itermSessionId = stripItermPrefix(newest.itermSessionId);
+          activeItermSessionId = itermSessionId!;
+          process.stderr.write(`[whazaa-watch] /ss: registry fallback to session ${newest.sessionId} (${newest.name}), iTerm ${itermSessionId}\n`);
+        }
+      }
+
+      // Priority 4: Auto-discover from live Claude tab names (backwards-compat fallback
+      // for cold starts where no sessions have registered yet).
       if (!itermSessionId) {
         const liveSessions = listClaudeSessions();
         if (liveSessions.length > 0) {
           itermSessionId = liveSessions[0].id;
           activeItermSessionId = liveSessions[0].id;
-          process.stderr.write(`[whazaa-watch] /ss: auto-discovered session ${liveSessions[0].id} (${liveSessions[0].name})\n`);
+          process.stderr.write(`[whazaa-watch] /ss: tab-name fallback — discovered session ${liveSessions[0].id} (${liveSessions[0].name})\n`);
         }
       }
 
@@ -3049,6 +3139,7 @@ end tell`;
         // If a new name was provided, persist it as a session variable and update registry
         if (newName) {
           setItermSessionVar(chosen.id, newName);
+          setItermTabName(chosen.id, newName);
           if (regEntry) {
             regEntry.name = newName;
           }
