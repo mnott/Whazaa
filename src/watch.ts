@@ -1127,7 +1127,8 @@ async function handleRequest(
         break;
       }
 
-      const ttsVoice = params.voice != null ? String(params.voice) : undefined;
+      // Use explicitly-provided voice, or fall back to configured defaultVoice
+      const ttsVoice = params.voice != null ? String(params.voice) : loadVoiceConfig().defaultVoice;
       const ttsRecipient = params.jid != null ? String(params.jid) : undefined;
 
       if (!watcherSock) {
@@ -1626,17 +1627,28 @@ async function handleScreenshot(): Promise<void> {
     // Priority:
     //   1. Registry entry for activeClientId (most precise — set when MCP client registered)
     //   2. activeItermSessionId (set by /N switch commands — always up-to-date)
-    //   3. Fall back to window 1 (last resort)
+    //   3. Auto-discover from live Claude sessions (handles cold start / post-restart)
+    //   4. Fall back to window 1 (last resort)
     let windowId: string;
     try {
       const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
       // Prefer registry itermSessionId; fall back to the module-level activeItermSessionId
-      const itermSessionId = activeEntry?.itermSessionId ?? (activeItermSessionId || undefined);
+      let itermSessionId = activeEntry?.itermSessionId ?? (activeItermSessionId || undefined);
+
+      // Auto-discover: if no session is tracked, scan for live Claude sessions
+      if (!itermSessionId) {
+        const liveSessions = listClaudeSessions();
+        if (liveSessions.length > 0) {
+          itermSessionId = liveSessions[0].id;
+          activeItermSessionId = liveSessions[0].id;
+          process.stderr.write(`[whazaa-watch] /ss: auto-discovered session ${liveSessions[0].id} (${liveSessions[0].name})\n`);
+        }
+      }
 
       if (itermSessionId) {
         // Single atomic AppleScript: find the session, select its tab, raise
         // its window to the top of all iTerm2 windows, activate iTerm2, and
-        // return the CGWindowID — all using the direct window reference `w`
+        // return the window ID — all using the direct window reference `w`
         // so there's no chance of targeting the wrong window.
         const findAndRaiseScript = `tell application "iTerm2"
   repeat with w in windows
@@ -1651,7 +1663,6 @@ async function handleScreenshot(): Promise<void> {
           set index of w to 1
           -- Bring iTerm2 to the foreground of all applications
           activate
-          -- Return the CGWindowID for screencapture
           return id of w
         end if
       end repeat
@@ -1673,13 +1684,13 @@ end tell`;
           process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
         }
       } else {
-        // No active session known — activate iTerm2 and use frontmost window
+        // Truly no Claude sessions — activate iTerm2 and use frontmost window
         runAppleScript('tell application "iTerm2" to activate');
         windowId = execSync(
           'osascript -e \'tell application "iTerm2" to id of window 1\'',
           { timeout: 10_000 }
         ).toString().trim();
-        process.stderr.write(`[whazaa-watch] /ss: no active session tracked, falling back to window 1 (id=${windowId})\n`);
+        process.stderr.write(`[whazaa-watch] /ss: no Claude sessions found, falling back to window 1 (id=${windowId})\n`);
       }
     } catch {
       await watcherSendMessage("Error: iTerm2 is not running or has no open windows.").catch(() => {});
