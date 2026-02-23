@@ -33,8 +33,9 @@ yarn-error.log*
 # TypeScript incremental compilation info
 *.tsbuildinfo
 
-# Session notes (local only)
+# Session notes and task tracking (local only)
 Notes/
+tasks/
 
 # Whisper test artifacts
 test_noise.*
