@@ -104,6 +104,9 @@ interface RegisteredSession {
 /** Registry of all connected MCP sessions, keyed by TERM_SESSION_ID */
 const sessionRegistry = new Map<string, RegisteredSession>();
 
+/** Explicitly tracked sessions opened via /t — keyed by iTerm2 session UUID */
+const managedSessions = new Map<string, { name: string; createdAt: number }>();
+
 /** The session ID of the most-recently-active MCP client */
 let activeClientId: string | null = null;
 
@@ -486,11 +489,12 @@ async function watcherSendMessage(message: string, recipient?: string): Promise<
 function setItermSessionVar(itermSessionId: string, name: string): void {
   try {
     const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const escapedId = itermSessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     const script = `tell application "iTerm2"
   repeat with aWindow in windows
     repeat with aTab in tabs of aWindow
       repeat with aSession in sessions of aTab
-        if id of aSession is "${itermSessionId}" then
+        if id of aSession is "${escapedId}" then
           tell aSession
             set variable named "user.paiName" to "${escaped}"
           end tell
@@ -515,11 +519,12 @@ end tell`;
  */
 function getItermSessionVar(itermSessionId: string): string | null {
   try {
+    const escaped = itermSessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     const script = `tell application "iTerm2"
   repeat with aWindow in windows
     repeat with aTab in tabs of aWindow
       repeat with aSession in sessions of aTab
-        if id of aSession is "${itermSessionId}" then
+        if id of aSession is "${escaped}" then
           tell aSession
             try
               return (variable named "user.paiName")
@@ -1497,29 +1502,33 @@ function expandTilde(p: string): string {
 
 /**
  * Handle a /t [command] command received via WhatsApp.
- * Opens a raw terminal tab in iTerm2 (no Claude). If a command is given, runs it.
+ * Opens a plain terminal tab in iTerm2 (no Claude). If a command is given, runs it.
+ * Registers the new tab in managedSessions so /s and /N can find it.
  */
-function handleTerminal(nameOrNull: string | null): void {
-  const sessionName = nameOrNull || null;
-  process.stderr.write(`[whazaa-watch] /t -> ${sessionName ?? "(new claude session)"}\n`);
+function handleTerminal(commandOrNull: string | null): void {
+  const command = commandOrNull?.trim() || null;
+  process.stderr.write(`[whazaa-watch] /t -> ${command ?? "(plain terminal)"}\n`);
 
-  // Open a new tab and launch Claude so it appears in /s and messages route to it.
+  // Build AppleScript: open a new tab (plain shell, default profile),
+  // optionally run the command, and return the session ID.
+  const writeCmd = command
+    ? `\n      write text "${command.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+    : "";
+
   const script = `
 tell application "iTerm2"
   if (count of windows) = 0 then
-    set newWindow to (create window with default profile)
+    set newWindow to (create window with default profile command "/bin/zsh")
     set newSession to current session of current tab of newWindow
-    tell newSession
-      write text "claude"
+    tell newSession${writeCmd}
     end tell
     activate
     return id of newSession
   else
     tell current window
-      set newTab to (create tab with default profile)
+      set newTab to (create tab with default profile command "/bin/zsh")
       set newSession to current session of newTab
-      tell newSession
-        write text "claude"
+      tell newSession${writeCmd}
       end tell
       return id of newSession
     end tell
@@ -1530,18 +1539,21 @@ end tell`;
   if (result === null) {
     process.stderr.write("[whazaa-watch] /t: failed to open terminal tab\n");
     watcherSendMessage("Failed to open terminal tab.").catch(() => {});
-  } else {
-    // Track the new session as active so messages route to it
-    activeItermSessionId = result;
-    activeClientId = null; // no MCP client yet — will be set when Claude registers
-
-    // Always persist a session name so /s can find it immediately
-    const label = sessionName ?? "Claude";
-    setItermSessionVar(result, label);
-
-    process.stderr.write(`[whazaa-watch] /t: opened ${label} (session ${result})\n`);
-    watcherSendMessage(`Opened *${label}* ← active`).catch(() => {});
+    return;
   }
+
+  // Register in managedSessions so /s and /N can find it
+  const label = command ?? "Terminal";
+  managedSessions.set(result, { name: label, createdAt: Date.now() });
+
+  // Track as active iTerm2 session so /N switching works
+  activeItermSessionId = result;
+
+  // Persist the name in iTerm2 session variable for recovery across watcher restarts
+  setItermSessionVar(result, label);
+
+  process.stderr.write(`[whazaa-watch] /t: opened terminal "${label}" (session ${result})\n`);
+  watcherSendMessage(`Opened terminal *${label}* ← active`).catch(() => {});
 }
 
 /**
@@ -1670,6 +1682,56 @@ end tell`;
     sessions.push({ id, name, path });
   }
   return sessions;
+}
+
+/**
+ * Check whether an iTerm2 session (by UUID) is still alive.
+ * Returns true if the session exists in any window/tab, false if it has closed.
+ */
+function isItermSessionAlive(sessionId: string): boolean {
+  const escaped = sessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const script = `tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${escaped}" then return "alive"
+      end repeat
+    end repeat
+  end repeat
+  return "gone"
+end tell`;
+  return runAppleScript(script) === "alive";
+}
+
+/**
+ * Build a merged session list that includes both:
+ *   - autodetected Claude sessions (from listClaudeSessions)
+ *   - terminal sessions explicitly opened via /t (from managedSessions)
+ *
+ * Stale managedSessions entries (whose iTerm2 session has closed) are pruned.
+ */
+function getSessionList(): Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> {
+  const claudeSessions = listClaudeSessions().map((s) => ({ ...s, type: "claude" as const }));
+  const claudeIds = new Set(claudeSessions.map((s) => s.id));
+
+  const terminalSessions: Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> = [];
+  for (const [id, entry] of managedSessions) {
+    if (claudeIds.has(id)) {
+      // This terminal tab has since launched Claude — let Claude list pick it up,
+      // and remove from managedSessions to avoid duplication.
+      managedSessions.delete(id);
+      continue;
+    }
+    if (isItermSessionAlive(id)) {
+      const paiName = getItermSessionVar(id);
+      terminalSessions.push({ id, name: paiName ?? entry.name, path: "", type: "terminal" });
+    } else {
+      // Tab was closed — prune from registry
+      managedSessions.delete(id);
+    }
+  }
+
+  return [...claudeSessions, ...terminalSessions];
 }
 
 /**
@@ -2606,10 +2668,10 @@ export async function watch(rawSessionId?: string): Promise<void> {
     // --- /sessions (aliases: /s) — list sessions ------------------------------
     if (trimmedText === "/sessions" || trimmedText === "/s") {
       // Clean up stale registry entries by cross-referencing live iTerm2 sessions
-      const liveSessions = listClaudeSessions();
-      const liveItermIds = new Set(liveSessions.map((s) => s.id));
+      const allSessions = getSessionList();
+      const allSessionIds = new Set(allSessions.map((s) => s.id));
       for (const [sid, entry] of sessionRegistry) {
-        if (entry.itermSessionId && !liveItermIds.has(entry.itermSessionId)) {
+        if (entry.itermSessionId && !allSessionIds.has(entry.itermSessionId)) {
           sessionRegistry.delete(sid);
           clientQueues.delete(sid);
           if (activeClientId === sid) {
@@ -2619,24 +2681,14 @@ export async function watch(rawSessionId?: string): Promise<void> {
         }
       }
 
-      // Include pending /t sessions that haven't fully started Claude yet.
-      // activeItermSessionId may point to a tab where Claude is still loading.
-      if (activeItermSessionId && !liveItermIds.has(activeItermSessionId)) {
-        const paiName = getItermSessionVar(activeItermSessionId);
-        if (paiName) {
-          liveSessions.push({ id: activeItermSessionId, name: paiName, path: "" });
-          liveItermIds.add(activeItermSessionId);
-        }
-      }
-
-      if (liveSessions.length === 0 && sessionRegistry.size === 0) {
-        watcherSendMessage("No Claude sessions found.").catch(() => {});
+      if (allSessions.length === 0 && sessionRegistry.size === 0) {
+        watcherSendMessage("No sessions found.").catch(() => {});
         return;
       }
 
-      // If no active session tracked yet, auto-discover from live sessions
-      if (!activeItermSessionId && liveSessions.length > 0) {
-        const firstClaude = liveSessions.find((s) => isClaudeRunningInSession(s.id));
+      // If no active session tracked yet, auto-discover from live Claude sessions
+      if (!activeItermSessionId && allSessions.length > 0) {
+        const firstClaude = allSessions.find((s) => s.type === "claude" && isClaudeRunningInSession(s.id));
         if (firstClaude) {
           activeSessionId = firstClaude.id;
           activeItermSessionId = firstClaude.id;
@@ -2645,7 +2697,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
 
       // Build display list: prefer user.paiName session variable, then registry,
       // then cwd basename, then iTerm2 session name.
-      const lines = liveSessions.map((s, i) => {
+      const lines = allSessions.map((s, i) => {
         // Find registry entry by matching iTerm2 session ID
         const regEntry = [...sessionRegistry.values()].find(
           (e) => e.itermSessionId === s.id
@@ -2656,13 +2708,14 @@ export async function watch(rawSessionId?: string): Promise<void> {
           ?? (regEntry ? regEntry.name : null)
           ?? (s.path ? basename(s.path) : null)
           ?? s.name;
+        const typeTag = s.type === "terminal" ? " [terminal]" : "";
         // activeItermSessionId is the single source of truth — always set by
         // /N switch, message delivery, and auto-discovery.  Only fall back to
         // activeClientId (registry-based) when no explicit session has been chosen yet.
         const isActive = activeItermSessionId
           ? s.id === activeItermSessionId
           : regEntry ? activeClientId === regEntry.sessionId : false;
-        return `${i + 1}. ${label}${isActive ? " \u2190 active" : ""}`;
+        return `${i + 1}. ${label}${typeTag}${isActive ? " \u2190 active" : ""}`;
       });
       const reply = lines.join("\n");
       watcherSendMessage(reply).catch(() => {});
@@ -2674,9 +2727,9 @@ export async function watch(rawSessionId?: string): Promise<void> {
     if (sessionSwitchMatch) {
       const num = parseInt(sessionSwitchMatch[1], 10);
       const newName = sessionSwitchMatch[2]?.trim() || null;
-      const sessions = listClaudeSessions();
+      const sessions = getSessionList();
       if (sessions.length === 0) {
-        watcherSendMessage("No Claude sessions found.").catch(() => {});
+        watcherSendMessage("No sessions found.").catch(() => {});
         return;
       }
       if (num < 1 || num > sessions.length) {
@@ -2684,12 +2737,13 @@ export async function watch(rawSessionId?: string): Promise<void> {
         return;
       }
       const chosen = sessions[num - 1];
+      const escapedSessionId = chosen.id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       const focusScript = `
 tell application "iTerm2"
   repeat with aWindow in windows
     repeat with aTab in tabs of aWindow
       repeat with aSession in sessions of aTab
-        if id of aSession is "${chosen.id}" then
+        if id of aSession is "${escapedSessionId}" then
           select aSession
           return "focused"
         end if
@@ -2787,6 +2841,24 @@ end tell`;
    * Smart delivery: type message into the active Claude session.
    */
   function deliverMessage(text: string): boolean {
+    // Sync from module-level activeItermSessionId (set by /t, /N, handleTerminal)
+    // so that terminal tabs opened outside the watch() closure are respected.
+    if (activeItermSessionId && activeItermSessionId !== activeSessionId) {
+      activeSessionId = activeItermSessionId;
+    }
+
+    // If the active session is a managed terminal tab (no Claude), type directly.
+    // managedSessions is keyed by bare UUID; activeSessionId may have a prefix like "w0t3p0:UUID".
+    const bareSessionId = activeSessionId?.includes(":") ? activeSessionId.split(":").pop()! : activeSessionId;
+    if (bareSessionId && managedSessions.has(bareSessionId)) {
+      if (typeIntoSession(bareSessionId, text)) {
+        consecutiveFailures = 0;
+        return true;
+      }
+      // Terminal session may have closed — clean up and fall through
+      managedSessions.delete(bareSessionId);
+    }
+
     if (activeSessionId && isClaudeRunningInSession(activeSessionId)) {
       if (typeIntoSession(activeSessionId, text)) {
         consecutiveFailures = 0;

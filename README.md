@@ -2,7 +2,7 @@
 
 Your phone is now a Claude Code terminal. Send a WhatsApp message, Claude gets it. Claude responds, you see it on WhatsApp. Text, images, voice notes — in both directions.
 
-Dictate a voice note while driving and Claude starts coding. Send an image from your phone and Claude interprets it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh. Take screenshots of any claude session using `/ss` and have the screenshot sent to you via WhatsApp.
+Dictate a voice note while driving and Claude starts coding. Send an image from your phone and Claude interprets it. Get spoken responses back in any of 28 voices — all synthesized locally, nothing leaves your machine. Take complete control of your computer using `/t` to open and manage any number of terminal sessions. Manage multiple Claude sessions from your couch with `/s`, switch between them, or `/kill` a stuck one and restart it fresh. Take screenshots of any session using `/ss` and have the screenshot sent to you via WhatsApp.
 
 One command to set up. Zero cloud dependencies for voice. Works with any WhatsApp account.
 
@@ -373,7 +373,8 @@ Certain messages sent from your phone are intercepted by the watcher and handled
 | Command | Description |
 |---------|-------------|
 | `/relocate <path>` or `/r <path>` | Open a new iTerm2 tab in the given directory and start Claude there |
-| `/sessions` or `/s` | List open Claude sessions with names; reply `/N` to switch, `/N name` to switch and rename |
+| `/t` or `/t <command>` | Open a plain terminal tab (no Claude); optionally run a command |
+| `/sessions` or `/s` | List open sessions (Claude and terminal) with names; reply `/N` to switch, `/N name` to switch and rename |
 | `/ss` or `/screenshot` | Capture the active Claude session's iTerm2 window and send it back as an image |
 | `/kill N` or `/k N` | Kill a stuck Claude session and restart it fresh in the same directory |
 | _(image)_ | Send an image — the watcher downloads it and types the path into Claude |
@@ -390,9 +391,23 @@ If a Claude session is already open in that directory, Whazaa focuses it instead
 
 After relocating, subsequent messages are delivered to the new session.
 
+### /t (terminal)
+
+```
+/t
+/t ls -la
+/t htop
+```
+
+Opens a plain terminal tab in iTerm2 — no Claude, just a shell. If you include a command, it runs immediately. The new tab is registered so it appears in `/s` alongside your Claude sessions, and you can switch to it with `/N`.
+
+Once a terminal tab is active, any text you send from WhatsApp is typed directly into it. This gives you full control of your computer from your phone — run shell commands, monitor processes, tail logs, or do anything you'd do at a terminal.
+
+Switch back to a Claude session anytime with `/N`.
+
 ### /sessions
 
-Reply `/s` to get a numbered list of open Claude sessions with their working directories and names. The currently active session is marked with `*`.
+Reply `/s` to get a numbered list of all open sessions — both Claude sessions and terminal tabs opened via `/t`. The currently active session is marked. Terminal sessions are labeled `[terminal]`.
 
 Switch to a session with `/1`, `/2`, etc. Switch and rename in one step with `/1 My Project`. Session names are stored as iTerm2 session variables and persist across watcher restarts.
 
