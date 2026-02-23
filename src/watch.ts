@@ -1697,11 +1697,24 @@ end tell`;
     // frontmost and the correct tab is selected, macOS will redraw it.
     await new Promise((r) => setTimeout(r, 1500));
 
-    // Capture the specific window by its CGWindowID.
-    // Using -l captures exactly this window. The buffer is fresh because
-    // we raised the window and waited for the redraw above.
-    process.stderr.write(`[whazaa-watch] /ss: capturing window id ${windowId}\n`);
-    execSync(`screencapture -x -o -l ${windowId} "${filePath}"`, { timeout: 15_000 });
+    // Capture the frontmost iTerm2 window using screen-region capture (-R).
+    // We cannot use -l (window layer by CGWindowID) because iTerm2's
+    // AppleScript `id of window` returns an internal iTerm2 ID, not the
+    // CGWindowID that screencapture expects. Instead, since we just raised
+    // the correct window to index 1, we get its bounds from System Events
+    // and capture that screen region from the display framebuffer.
+    const boundsScript = `tell application "System Events" to tell process "iTerm2"
+  set w to window 1
+  set {x, y} to position of w
+  set {width, height} to size of w
+  return (x as text) & "," & (y as text) & "," & (width as text) & "," & (height as text)
+end tell`;
+    const bounds = runAppleScript(boundsScript);
+    if (!bounds || !bounds.includes(",")) {
+      throw new Error("Could not get window bounds from System Events");
+    }
+    process.stderr.write(`[whazaa-watch] /ss: capturing screen region ${bounds} (iTerm2 window ${windowId})\n`);
+    execSync(`screencapture -x -R ${bounds} "${filePath}"`, { timeout: 15_000 });
 
     const buffer = readFileSync(filePath);
 
