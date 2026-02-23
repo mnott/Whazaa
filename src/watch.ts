@@ -681,15 +681,22 @@ async function handleRequest(
       const itermHint = params.itermSessionId != null ? String(params.itermSessionId) : undefined;
       const itermId = findItermSessionForTermId(sessionId, itermHint);
 
+      // If this iTerm session has a persisted paiName (set by /N rename),
+      // restore it — iTerm variables survive watcher restarts.
+      const persistedName = itermId ? getItermSessionVar(itermId) : null;
+      const effectiveName = persistedName ?? name;
+
       sessionRegistry.set(sessionId, {
         sessionId,
-        name,
+        name: effectiveName,
         itermSessionId: itermId ?? undefined,
         registeredAt: Date.now(),
       });
 
-      if (itermId) {
-        setItermSessionVar(itermId, name);
+      if (itermId && !persistedName) {
+        // Only write to iTerm var when there is no pre-existing persisted name;
+        // if persistedName was already there, the var is already correct.
+        setItermSessionVar(itermId, effectiveName);
       }
 
       // Only claim activeClientId if no session is currently registered, or
@@ -701,7 +708,7 @@ async function handleRequest(
       if (!clientQueues.has(sessionId)) {
         clientQueues.set(sessionId, []);
       }
-      process.stderr.write(`[whazaa-watch] IPC: registered client ${sessionId} (name: "${name}", iTerm: ${itermId ?? "unknown"})\n`);
+      process.stderr.write(`[whazaa-watch] IPC: registered client ${sessionId} (name: "${effectiveName}"${persistedName ? " [restored from iTerm]" : ""}, iTerm: ${itermId ?? "unknown"})\n`);
       sendResponse(socket, { id, ok: true, result: { registered: true } });
       socket.end();
       break;
@@ -2590,7 +2597,9 @@ export async function watch(rawSessionId?: string): Promise<void> {
           ?? (regEntry ? regEntry.name : null)
           ?? (s.path ? basename(s.path) : null)
           ?? s.name;
-        const isActive = (regEntry && activeClientId === regEntry.sessionId) || s.id === activeItermSessionId;
+        const isActive = regEntry
+          ? activeClientId === regEntry.sessionId
+          : s.id === activeItermSessionId;
         return `${i + 1}. ${label}${isActive ? " \u2190 active" : ""}`;
       });
       const reply = lines.join("\n");
