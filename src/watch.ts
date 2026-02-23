@@ -1655,6 +1655,12 @@ async function handleScreenshot(): Promise<void> {
   end repeat
   return ""
 end tell`;
+        // Check if the target session is already frontmost (skip switch + delay)
+        const currentFrontScript = `tell application "iTerm2" to id of current session of current tab of window 1`;
+        let currentSessionId = "";
+        try { currentSessionId = runAppleScript(currentFrontScript) || ""; } catch {}
+        const alreadyFront = currentSessionId === itermSessionId;
+
         const switchResult = runAppleScript(switchScript);
         if (!switchResult || switchResult !== "ok") {
           // Session UUID not found — fall back to window 1
@@ -1665,9 +1671,10 @@ end tell`;
           process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
         } else {
           // Step 2: Wait for iTerm2 to render the newly-visible tab.
-          // This delay is in Node.js, NOT inside an Apple Events transaction,
-          // so iTerm2's render loop is free to composite the new tab content.
-          await new Promise((r) => setTimeout(r, 1500));
+          // Skip the delay if the session was already frontmost (no tab switch needed).
+          if (!alreadyFront) {
+            await new Promise((r) => setTimeout(r, 500));
+          }
 
           // Step 3: Get the window ID in a separate AppleScript call.
           const idScript = `tell application "iTerm2"
