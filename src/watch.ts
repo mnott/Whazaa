@@ -1683,10 +1683,9 @@ async function handleScreenshot(): Promise<void> {
       set t to tab tabIdx of w
       repeat with s in sessions of t
         if id of s is "${itermSessionId}" then
-          -- Switch to the correct tab using the proper iTerm2 API.
-          -- "select t" does NOT reliably switch the visible tab in a multi-tab
-          -- window; "set current tab of w to t" is the correct command.
-          set current tab of w to t
+          -- Switch to the correct tab. "select t" on a tab reference works
+          -- reliably. "set current tab of w to t" throws -10000 errors.
+          select t
           -- Raise THIS window to the top of all iTerm2 windows
           set index of w to 1
           -- Bring iTerm2 to the foreground of all applications
