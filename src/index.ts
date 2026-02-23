@@ -394,6 +394,34 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Tool: whatsapp_send_file
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_send_file",
+  "Send a file (document, image, video, audio) via WhatsApp. Supports any file type — PDFs, Word docs, images, videos, etc.",
+  {
+    filePath: z.string().min(1).describe("Absolute path to the file to send"),
+    recipient: z.string().optional().describe("Optional recipient: phone number, JID, or contact name. Omit to send to self-chat."),
+    caption: z.string().optional().describe("Optional caption/message to accompany the file"),
+  },
+  async ({ filePath, recipient, caption }) => {
+    try {
+      const result = await watcher.sendFile(filePath, recipient, caption);
+      return {
+        content: [{ type: "text" as const, text: `Sent: ${result.fileName} (${result.fileSize} bytes) to ${result.targetJid}` }],
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text" as const, text: `Failed to send file: ${msg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Tool: whatsapp_receive
 // ---------------------------------------------------------------------------
 
