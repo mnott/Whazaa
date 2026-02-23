@@ -1709,39 +1709,32 @@ end tell`;
       return;
     }
 
-    // Step 2: Wait for iTerm2 to fully redraw after being activated.
-    // When iTerm2 is in the background, macOS throttles rendering and the
-    // window server holds a stale buffer. `activate` requests a redraw but
-    // we must wait for it to complete before capturing.
+    // Step 2: Raise the specific window to the very front.
+    // The switchScript's `set frontmost of w to true` + `activate` isn't
+    // always reliable with multiple iTerm2 windows. Setting `index to 1`
+    // explicitly makes this window the topmost iTerm2 window, and a second
+    // `activate` ensures iTerm2 itself is the frontmost application.
+    try {
+      runAppleScript(`tell application "iTerm2"
+  set index of window id ${windowId} to 1
+  activate
+end tell`);
+    } catch {
+      // Best-effort — the switchScript already tried to raise it
+    }
+
+    // Step 3: Wait for iTerm2 to fully redraw after being raised.
+    // When iTerm2 was in the background, macOS throttles rendering and the
+    // window server holds a stale buffer. Now that the specific window is
+    // frontmost, macOS will redraw it. We wait for that to complete.
     await new Promise((r) => setTimeout(r, 1500));
 
-    // Get the window bounds and capture from the display framebuffer using -R
-    // instead of -l. The -l flag captures from the window server's cached
-    // buffer which can be stale when iTerm2 was in the background. The -R
-    // flag captures from the actual screen, which is always up-to-date after
-    // the window has been brought to front and redrawn.
-    let captureCmd: string;
-    try {
-      const boundsScript = `tell application "System Events" to tell process "iTerm2"
-  set w to window 1
-  set {x, y} to position of w
-  set {width, height} to size of w
-  return (x as text) & "," & (y as text) & "," & (width as text) & "," & (height as text)
-end tell`;
-      const bounds = runAppleScript(boundsScript);
-      if (bounds && bounds.includes(",")) {
-        captureCmd = `screencapture -x -R ${bounds} "${filePath}"`;
-        process.stderr.write(`[whazaa-watch] /ss: capturing screen region ${bounds}\n`);
-      } else {
-        // Bounds lookup failed — fall back to window layer capture
-        captureCmd = `screencapture -x -o -l ${windowId} "${filePath}"`;
-        process.stderr.write(`[whazaa-watch] /ss: bounds lookup failed, falling back to -l capture\n`);
-      }
-    } catch {
-      captureCmd = `screencapture -x -o -l ${windowId} "${filePath}"`;
-      process.stderr.write(`[whazaa-watch] /ss: bounds error, falling back to -l capture\n`);
-    }
-    execSync(captureCmd, { timeout: 15_000 });
+    // Step 4: Capture the specific window by its CGWindowID.
+    // Using -l ensures we capture exactly the right window even if another
+    // window overlaps. The buffer is now fresh because we raised and
+    // activated the window in steps 2-3.
+    process.stderr.write(`[whazaa-watch] /ss: capturing window id ${windowId}\n`);
+    execSync(`screencapture -x -o -l ${windowId} "${filePath}"`, { timeout: 15_000 });
 
     const buffer = readFileSync(filePath);
 
