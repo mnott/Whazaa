@@ -137,6 +137,12 @@ export interface SendFileResult {
   targetJid: string;
 }
 
+export interface DiscoverResult {
+  alive: string[];
+  pruned: string[];
+  discovered: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -272,6 +278,11 @@ export class WatcherClient {
     if (voice !== undefined) params.voice = voice;
     const result = await this.call("speak", params);
     return result as unknown as SpeakResult;
+  }
+
+  async discover(): Promise<DiscoverResult> {
+    const result = await this.call("discover", {});
+    return result as unknown as DiscoverResult;
   }
 
   // -------------------------------------------------------------------------
