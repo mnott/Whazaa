@@ -228,15 +228,10 @@ export function setWatcherSock(sock: ReturnType<typeof makeWASocket> | null): vo
  * true only during the brief window between socket open and QR code scan.
  */
 export let watcherStatus = {
-  /** True once the Baileys connection is fully open and ready. */
   connected: false,
-  /** International phone number of the authenticated account, or null. */
   phoneNumber: null as string | null,
-  /** Primary JID of the authenticated account (e.g. "41764502698@s.whatsapp.net"), or null. */
   selfJid: null as string | null,
-  /** Linked-device LID assigned by WhatsApp servers, or null for legacy accounts. */
   selfLid: null as string | null,
-  /** True when the socket has opened but the QR code has not yet been scanned. */
   awaitingQR: false,
 };
 

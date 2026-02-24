@@ -1,6 +1,5 @@
 /**
- * @module baileys
- * @file baileys.ts — WhatsApp/Baileys connection lifecycle management
+ * baileys.ts — WhatsApp/Baileys connection lifecycle management
  *
  * This module owns the single persistent WhatsApp connection for the watcher
  * process.  It is the only place that calls `makeWASocket` — all other watcher
@@ -59,6 +58,7 @@ import { loadStoreCache, saveStoreCache } from "./persistence.js";
 import { stopTypingIndicator } from "./typing.js";
 import { trackContact } from "./contacts.js";
 import { downloadImageToTemp, downloadAudioAndTranscribe } from "./media.js";
+import { log } from "./log.js";
 import type { WatcherConnStatus } from "./types.js";
 
 /**
@@ -133,15 +133,13 @@ export async function connectWatcher(
       MAX_RECONNECT_DELAY_MS
     );
 
-    process.stderr.write(
-      `[whazaa-watch] WhatsApp reconnecting in ${delay / 1_000}s (attempt ${reconnectAttempts})...\n`
-    );
+    log(`WhatsApp reconnecting in ${delay / 1_000}s (attempt ${reconnectAttempts})...`);
 
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!stopped) {
         openSocket().catch((err) => {
-          process.stderr.write(`[whazaa-watch] Reconnect error: ${err}\n`);
+          log(`Reconnect error: ${err}`);
         });
       }
     }, delay);
@@ -218,14 +216,10 @@ export async function connectWatcher(
             arr.push(msg);
           }
         }
-        process.stderr.write(
-          `[whazaa-watch] messaging-history.set: stored ${messages.length} messages across ${messageStore.size} JIDs (syncType=${syncType})\n`
-        );
+        log(`messaging-history.set: stored ${messages.length} messages across ${messageStore.size} JIDs (syncType=${syncType})`);
       }
 
-      process.stderr.write(
-        `[whazaa-watch] messaging-history.set: ${chats.length} chats, ${contacts.length} contacts — store: ${chatStore.size} chats, ${contactStore.size} contacts\n`
-      );
+      log(`messaging-history.set: ${chats.length} chats, ${contacts.length} contacts — store: ${chatStore.size} chats, ${contactStore.size} contacts`);
       saveStoreCache();
     });
 
@@ -236,9 +230,7 @@ export async function connectWatcher(
           chatStore.set(chat.id, chat);
         }
       }
-      process.stderr.write(
-        `[whazaa-watch] chats.upsert: ${chats.length} chats — store now has ${chatStore.size}\n`
-      );
+      log(`chats.upsert: ${chats.length} chats — store now has ${chatStore.size}`);
       saveStoreCache();
     });
 
@@ -312,9 +304,7 @@ export async function connectWatcher(
           watcherStatus.selfLid = lid;
         }
 
-        process.stderr.write(
-          `[whazaa-watch] WhatsApp connected. Phone: +${watcherStatus.phoneNumber ?? "unknown"}\n`
-        );
+        log(`WhatsApp connected. Phone: +${watcherStatus.phoneNumber ?? "unknown"}`);
       }
 
       if (connection === "close") {
@@ -330,17 +320,13 @@ export async function connectWatcher(
 
         if (statusCode === DisconnectReason.loggedOut) {
           permanentlyLoggedOut = true;
-          process.stderr.write(
-            "[whazaa-watch] Logged out (401). Run 'npx whazaa setup' to re-pair.\n"
-          );
+          log("Logged out (401). Run 'npx whazaa setup' to re-pair.");
           return;
         }
 
         if (!stopped) {
           const errMsg = lastDisconnect?.error?.message ?? "unknown";
-          process.stderr.write(
-            `[whazaa-watch] Connection closed (code=${statusCode ?? "?"}, reason=${errMsg}). Will reconnect...\n`
-          );
+          log(`Connection closed (code=${statusCode ?? "?"}, reason=${errMsg}). Will reconnect...`);
           scheduleReconnect();
         }
       }
@@ -416,7 +402,7 @@ export async function connectWatcher(
                   onMessage(filePath, msgId, timestamp);
                 }
               }).catch((err) => {
-                process.stderr.write(`[whazaa-watch] Image delivery error: ${err}\n`);
+                log(`Image delivery error: ${err}`);
               });
             }
           } else if (isAudio) {
@@ -430,7 +416,7 @@ export async function connectWatcher(
                 if (!result) return;
                 onMessage(result, msgId, timestamp);
               }).catch((err) => {
-                process.stderr.write(`[whazaa-watch] Audio delivery error: ${err}\n`);
+                log(`Audio delivery error: ${err}`);
               });
             }
           } else {
@@ -447,9 +433,7 @@ export async function connectWatcher(
           trackContact(remoteJidNorm, senderName, timestamp);
           if (body) {
             enqueueContactMessage(remoteJidNorm, body, timestamp);
-            process.stderr.write(
-              `[whazaa-watch] Incoming from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${body.slice(0, 60)}\n`
-            );
+            log(`Incoming from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${body.slice(0, 60)}`);
           } else if (isAudio) {
             // Transcribe non-self-chat voice notes and enqueue for whatsapp_receive
             const audioMsg = msg.message!.audioMessage!;
@@ -460,21 +444,15 @@ export async function connectWatcher(
               downloadAudioAndTranscribe(msg, sockRef, duration, isPtt).then((transcript) => {
                 if (!transcript) return;
                 enqueueContactMessage(remoteJidNorm, transcript, timestamp);
-                process.stderr.write(
-                  `[whazaa-watch] Transcribed audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${transcript.slice(0, 60)}\n`
-                );
+                log(`Transcribed audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${transcript.slice(0, 60)}`);
               }).catch((err) => {
-                process.stderr.write(`[whazaa-watch] Non-self audio transcription error: ${err}\n`);
+                log(`Non-self audio transcription error: ${err}`);
               });
             } else {
-              process.stderr.write(
-                `[whazaa-watch] Incoming audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (no sock, skipping transcription)\n`
-              );
+              log(`Incoming audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (no sock, skipping transcription)`);
             }
           } else {
-            process.stderr.write(
-              `[whazaa-watch] Incoming image from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (not forwarded to iTerm2)\n`
-            );
+            log(`Incoming image from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (not forwarded to iTerm2)`);
           }
         }
       }
@@ -482,7 +460,7 @@ export async function connectWatcher(
   }
 
   await openSocket().catch((err) => {
-    process.stderr.write(`[whazaa-watch] Initial connect error: ${err}\n`);
+    log(`Initial connect error: ${err}`);
     scheduleReconnect();
   });
 

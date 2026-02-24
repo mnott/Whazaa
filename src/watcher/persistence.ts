@@ -26,21 +26,17 @@ import {
   contactStore,
   messageStore,
 } from "./state.js";
+import { log } from "./log.js";
 import type { VoiceConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Path constants
 // ---------------------------------------------------------------------------
 
-/** Absolute path to the Whazaa data directory: `~/.whazaa/`. */
 export const WHAZAA_DIR = join(homedir(), ".whazaa");
-/** Absolute path to the serialised Baileys chat store: `~/.whazaa/chat-cache.json`. */
 export const CHAT_CACHE_PATH = join(WHAZAA_DIR, "chat-cache.json");
-/** Absolute path to the serialised Baileys contact store: `~/.whazaa/contact-cache.json`. */
 export const CONTACT_CACHE_PATH = join(WHAZAA_DIR, "contact-cache.json");
-/** Absolute path to the serialised message store: `~/.whazaa/message-cache.json`. */
 export const MESSAGE_CACHE_PATH = join(WHAZAA_DIR, "message-cache.json");
-/** Absolute path to the persisted voice-synthesis configuration: `~/.whazaa/voice-config.json`. */
 export const VOICE_CONFIG_PATH = join(WHAZAA_DIR, "voice-config.json");
 
 // ---------------------------------------------------------------------------
@@ -104,7 +100,7 @@ export function saveVoiceConfig(config: VoiceConfig): void {
     mkdirSync(WHAZAA_DIR, { recursive: true });
     writeFileSync(VOICE_CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
   } catch (err) {
-    process.stderr.write(`[whazaa-watch] Failed to save voice config: ${err}\n`);
+    log(`Failed to save voice config: ${err}`);
   }
 }
 
@@ -209,6 +205,6 @@ export function saveStoreCache(): void {
     }
     writeFileSync(MESSAGE_CACHE_PATH, JSON.stringify(msgObj), "utf-8");
   } catch (err) {
-    process.stderr.write(`[whazaa-watch] Failed to save store cache: ${err}\n`);
+    log(`Failed to save store cache: ${err}`);
   }
 }

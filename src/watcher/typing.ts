@@ -17,15 +17,9 @@
  */
 
 import { watcherSock, watcherStatus } from "./state.js";
+import { log } from "./log.js";
 
-// ---------------------------------------------------------------------------
-// Typing indicator state
-// ---------------------------------------------------------------------------
-
-/** Interval handle for the typing indicator refresh loop */
 let typingInterval: ReturnType<typeof setInterval> | null = null;
-
-/** JID to send typing presence to — updated when composing starts */
 let typingTargetJid: string | null = null;
 
 /**
@@ -44,7 +38,7 @@ export function startTypingIndicator(jid: string): void {
   const sendComposing = (): void => {
     if (!watcherSock || !watcherStatus.connected || !typingTargetJid) return;
     watcherSock.sendPresenceUpdate("composing", typingTargetJid).catch((err: unknown) => {
-      process.stderr.write(`[whazaa-watch] typing indicator error: ${err}\n`);
+      log(`typing indicator error: ${err}`);
     });
   };
 
@@ -67,7 +61,7 @@ export function stopTypingIndicator(): void {
 
   if (jid && watcherSock && watcherStatus.connected) {
     watcherSock.sendPresenceUpdate("paused", jid).catch((err: unknown) => {
-      process.stderr.write(`[whazaa-watch] typing indicator stop error: ${err}\n`);
+      log(`typing indicator stop error: ${err}`);
     });
   }
 }

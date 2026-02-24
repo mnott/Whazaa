@@ -1,8 +1,5 @@
 /**
- * @file screenshot.ts
- * @module watcher/screenshot
- *
- * Screenshot capture and WhatsApp delivery for the `/ss` command.
+ * screenshot.ts — Screenshot capture and WhatsApp delivery for the `/ss` command.
  *
  * This module implements the two-phase screenshot pipeline:
  *
@@ -34,7 +31,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync, execSync } from "node:child_process";
 
-import { runAppleScript } from "./iterm-core.js";
+import { runAppleScript, stripItermPrefix } from "./iterm-core.js";
+import { log } from "./log.js";
 import {
   activeClientId,
   activeItermSessionId,
@@ -72,12 +70,6 @@ import { listClaudeSessions } from "./iterm-sessions.js";
 export async function handleTextScreenshot(): Promise<void> {
   try {
     // Resolve the target iTerm2 session UUID (same priority chain as handleScreenshot)
-    const stripItermPrefix = (id: string | undefined): string | undefined => {
-      if (!id) return id;
-      const colonIdx = id.lastIndexOf(":");
-      return colonIdx >= 0 ? id.slice(colonIdx + 1) : id;
-    };
-
     const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
     let itermSessionId = stripItermPrefix(
       (activeItermSessionId || undefined) ?? activeEntry?.itermSessionId
@@ -132,10 +124,10 @@ end tell`;
       `*Terminal capture (screen locked):*\n\n\`\`\`\n${trimmed}\n\`\`\``
     ).catch(() => {});
 
-    process.stderr.write("[whazaa-watch] /ss: text capture sent (screen locked fallback)\n");
+    log("/ss: text capture sent (screen locked fallback)");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[whazaa-watch] /ss: text capture error — ${msg}\n`);
+    log(`/ss: text capture error — ${msg}`);
     await watcherSendMessage(
       `Screen is locked — text capture also failed: ${msg}`
     ).catch(() => {});
@@ -192,7 +184,7 @@ export async function handleScreenshot(): Promise<void> {
     );
     const lockCount = parseInt((lockCheck.stdout ?? "0").trim(), 10);
     if (lockCount > 0) {
-      process.stderr.write("[whazaa-watch] /ss: screen is locked — falling back to terminal text capture\n");
+      log("/ss: screen is locked — falling back to terminal text capture");
       await handleTextScreenshot();
       return;
     }
@@ -212,16 +204,9 @@ export async function handleScreenshot(): Promise<void> {
     let windowId: string;
     try {
       const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
-      // Prefer registry itermSessionId; fall back to the module-level activeItermSessionId.
-      // Strip any "w0t2p0:"-style prefix from ITERM_SESSION_ID so the bare UUID is used
-      // in AppleScript comparisons (iTerm2's `id of aSession` returns just the UUID).
-      const stripItermPrefix = (id: string | undefined): string | undefined => {
-        if (!id) return id;
-        const colonIdx = id.lastIndexOf(":");
-        return colonIdx >= 0 ? id.slice(colonIdx + 1) : id;
-      };
       // Prefer activeItermSessionId (explicitly set by /N switch, message delivery,
       // auto-discovery) over registry lookup — it's always the most up-to-date.
+      // Strip any "w0t2p0:"-style prefix so the bare UUID is used in AppleScript comparisons.
       let itermSessionId = stripItermPrefix((activeItermSessionId || undefined) ?? activeEntry?.itermSessionId);
 
       // Priority 3: Registry scan — find the most-recently-registered session that
@@ -233,7 +218,7 @@ export async function handleScreenshot(): Promise<void> {
         if (newest?.itermSessionId) {
           itermSessionId = stripItermPrefix(newest.itermSessionId);
           setActiveItermSessionId(itermSessionId!);
-          process.stderr.write(`[whazaa-watch] /ss: registry fallback to session ${newest.sessionId} (${newest.name}), iTerm ${itermSessionId}\n`);
+          log(`/ss: registry fallback to session ${newest.sessionId} (${newest.name}), iTerm ${itermSessionId}`);
         }
       }
 
@@ -244,7 +229,7 @@ export async function handleScreenshot(): Promise<void> {
         if (liveSessions.length > 0) {
           itermSessionId = liveSessions[0].id;
           setActiveItermSessionId(liveSessions[0].id);
-          process.stderr.write(`[whazaa-watch] /ss: tab-name fallback — discovered session ${liveSessions[0].id} (${liveSessions[0].name})\n`);
+          log(`/ss: tab-name fallback — discovered session ${liveSessions[0].id} (${liveSessions[0].name})`);
         }
       }
 
@@ -285,7 +270,7 @@ end tell`;
         const findResult = runAppleScript(findAndRaiseScript);
         if (findResult && findResult !== "") {
           windowId = findResult.trim();
-          process.stderr.write(`[whazaa-watch] /ss: found session ${itermSessionId} in window ${windowId}, tab switched and activated\n`);
+          log(`/ss: found session ${itermSessionId} in window ${windowId}, tab switched and activated`);
         } else {
           // Session not found — fall back to frontmost window
           runAppleScript('tell application "iTerm2" to activate');
@@ -296,7 +281,7 @@ end tell`;
 end tell`;
           const fallbackResult = runAppleScript(fallbackScript) ?? "";
           windowId = fallbackResult.trim();
-          process.stderr.write(`[whazaa-watch] /ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})\n`);
+          log(`/ss: session ${itermSessionId} not found, falling back to window 1 (id=${windowId})`);
         }
       } else {
         // Truly no Claude sessions — activate iTerm2 and use frontmost window
@@ -308,7 +293,7 @@ end tell`;
 end tell`;
         const fallbackResult = runAppleScript(fallbackScript) ?? "";
         windowId = fallbackResult.trim();
-        process.stderr.write(`[whazaa-watch] /ss: no Claude sessions found, falling back to window 1 (id=${windowId})\n`);
+        log(`/ss: no Claude sessions found, falling back to window 1 (id=${windowId})`);
       }
     } catch {
       await watcherSendMessage("Error: iTerm2 is not running or has no open windows.").catch(() => {});
@@ -349,7 +334,7 @@ end tell`;
     if (!bounds || !bounds.includes(",")) {
       throw new Error("Could not get window bounds from iTerm2");
     }
-    process.stderr.write(`[whazaa-watch] /ss: capturing screen region ${bounds} (iTerm2 window ${windowId})\n`);
+    log(`/ss: capturing screen region ${bounds} (iTerm2 window ${windowId})`);
     execSync(`screencapture -x -R ${bounds} "${filePath}"`, { timeout: 15_000 });
 
     const buffer = readFileSync(filePath);
@@ -372,10 +357,10 @@ end tell`;
       setTimeout(() => sentMessageIds.delete(id), 30_000);
     }
 
-    process.stderr.write("[whazaa-watch] /ss: screenshot sent successfully\n");
+    log("/ss: screenshot sent successfully");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[whazaa-watch] /ss: error — ${msg}\n`);
+    log(`/ss: error — ${msg}`);
     await watcherSendMessage(`Error taking screenshot: ${msg}`).catch(() => {});
   } finally {
     try {

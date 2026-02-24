@@ -29,10 +29,6 @@ const FFMPEG =
     (p) => p === "ffmpeg" || existsSync(p)
   ) ?? "ffmpeg";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 /** Known Kokoro voice names */
 export type KokoroVoice =
   | "af_heart" | "af_alloy" | "af_aoede" | "af_bella" | "af_jessica"
@@ -42,7 +38,6 @@ export type KokoroVoice =
   | "bf_alice" | "bf_emma" | "bf_isabella" | "bf_lily"
   | "bm_daniel" | "bm_fable" | "bm_george" | "bm_lewis";
 
-/** Available voice names — updated from README */
 const KNOWN_VOICES: KokoroVoice[] = [
   "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica",
   "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
@@ -55,9 +50,7 @@ const KNOWN_VOICES: KokoroVoice[] = [
 const DEFAULT_VOICE: KokoroVoice = (process.env.WHAZAA_TTS_VOICE as KokoroVoice | undefined) ?? "bm_fable";
 const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 
-// ---------------------------------------------------------------------------
-// Singleton KokoroTTS instance (lazy)
-// ---------------------------------------------------------------------------
+// Singleton KokoroTTS instance (lazy-initialized on first use)
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ttsInstance: any | null = null;
@@ -94,9 +87,6 @@ async function ensureInitialized(): Promise<void> {
   await initPromise;
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /**
  * Convert text to a WhatsApp-compatible OGG Opus voice note buffer.

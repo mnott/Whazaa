@@ -1,6 +1,5 @@
 /**
- * @module commands
- * @file commands.ts — WhatsApp slash-command router and iTerm2 message delivery
+ * commands.ts — WhatsApp slash-command router and iTerm2 message delivery
  *
  * This module is responsible for interpreting every message that arrives from
  * the user's self-chat WhatsApp conversation and either:
@@ -84,8 +83,10 @@ import {
   typeIntoSession,
   sendKeystrokeToSession,
   sendEscapeSequenceToSession,
+  stripItermPrefix,
 } from "./iterm-core.js";
 import { startTypingIndicator } from "./typing.js";
+import { log } from "./log.js";
 
 /**
  * Create the top-level message handler function used by `watch()`.
@@ -147,7 +148,7 @@ export function createMessageHandler(
 
     // If the active session is a managed terminal tab (no Claude), type directly.
     // managedSessions is keyed by bare UUID; activeSessionId may have a prefix like "w0t3p0:UUID".
-    const bareSessionId = activeSessionId?.includes(":") ? activeSessionId.split(":").pop()! : activeSessionId;
+    const bareSessionId = stripItermPrefix(activeSessionId) ?? activeSessionId;
     if (bareSessionId && managedSessions.has(bareSessionId)) {
       if (typeIntoSession(bareSessionId, text)) {
         setConsecutiveFailures(0);
@@ -164,14 +165,10 @@ export function createMessageHandler(
       }
     }
 
-    process.stderr.write(
-      `[whazaa-watch] ${activeSessionId ? `Session ${activeSessionId} is not running Claude.` : "No cached session."} Searching for another...\n`
-    );
+    log(`${activeSessionId ? `Session ${activeSessionId} is not running Claude.` : "No cached session."} Searching for another...`);
 
     const found = findClaudeSession();
-    process.stderr.write(
-      `[whazaa-watch] findClaudeSession() returned: ${found ?? "null"}\n`
-    );
+    log(`findClaudeSession() returned: ${found ?? "null"}`);
     if (found && isClaudeRunningInSession(found)) {
       setActiveSessionId(found);
       setActiveItermSessionId(found);
@@ -181,9 +178,7 @@ export function createMessageHandler(
       }
     }
 
-    process.stderr.write(
-      `[whazaa-watch] No running Claude session found. Starting new one...\n`
-    );
+    log("No running Claude session found. Starting new one...");
 
     const created = createClaudeSession();
     if (created) {
@@ -196,9 +191,7 @@ export function createMessageHandler(
     }
 
     setConsecutiveFailures(getConsecutiveFailures() + 1);
-    process.stderr.write(
-      `[whazaa-watch] Failed to deliver message (attempt ${getConsecutiveFailures()})\n`
-    );
+    log(`Failed to deliver message (attempt ${getConsecutiveFailures()})`);
     return false;
   }
 
@@ -229,11 +222,11 @@ export function createMessageHandler(
         if (newSessionId) {
           setActiveSessionId(newSessionId);
           setActiveItermSessionId(newSessionId);
-          process.stderr.write(`[whazaa-watch] Active session switched to ${newSessionId}\n`);
+          log(`Active session switched to ${newSessionId}`);
         }
         return;
       }
-      process.stderr.write("[whazaa-watch] /relocate: no path provided\n");
+      log("/relocate: no path provided");
       return;
     }
 
@@ -344,11 +337,11 @@ end tell`;
         );
         if (regEntry) {
           setActiveClientId(regEntry.sessionId);
-          process.stderr.write(`[whazaa-watch] /sessions: activeClientId -> ${regEntry.sessionId} ("${regEntry.name}")\n`);
+          log(`/sessions: activeClientId -> ${regEntry.sessionId} ("${regEntry.name}")`);
         } else {
           // Clear stale activeClientId so it doesn't conflict with activeItermSessionId
           setActiveClientId(null);
-          process.stderr.write(`[whazaa-watch] /sessions: activeClientId cleared (no registry entry for ${chosen.id})\n`);
+          log(`/sessions: activeClientId cleared (no registry entry for ${chosen.id})`);
         }
 
         // If a new name was provided, persist it as a session variable and update registry
@@ -358,14 +351,14 @@ end tell`;
           if (regEntry) {
             regEntry.name = newName;
           }
-          process.stderr.write(`[whazaa-watch] /sessions: renamed session ${chosen.id} to "${newName}"\n`);
+          log(`/sessions: renamed session ${chosen.id} to "${newName}"`);
         }
 
         const displayName = newName
           ?? getItermSessionVar(chosen.id)
           ?? (regEntry ? regEntry.name : null)
           ?? (chosen.path ? basename(chosen.path) : chosen.name);
-        process.stderr.write(`[whazaa-watch] /sessions: switched to iTerm2 session ${chosen.id} (${displayName})\n`);
+        log(`/sessions: switched to iTerm2 session ${chosen.id} (${displayName})`);
         watcherSendMessage(`Switched to *${displayName}*`).catch(() => {});
       } else {
         watcherSendMessage("Session not found — it may have closed.").catch(() => {});
@@ -387,7 +380,7 @@ end tell`;
     // --- /ss, /screenshot — capture and send iTerm2 window screenshot ---------
     if (trimmedText === "/ss" || trimmedText === "/screenshot") {
       handleScreenshot().catch((err) => {
-        process.stderr.write(`[whazaa-watch] /ss: unhandled error — ${err}\n`);
+        log(`/ss: unhandled error — ${err}`);
       });
       return;
     }
@@ -500,7 +493,7 @@ end tell`;
           const msgText = pickText ? `Picked option ${pickNum}: ${pickText}` : `Picked option ${pickNum}`;
           watcherSendMessage(msgText).catch(() => {});
         })().catch((err) => {
-          process.stderr.write(`[whazaa-watch] /pick: error — ${err}\n`);
+          log(`/pick: error — ${err}`);
         });
         return;
       }
@@ -522,11 +515,11 @@ end tell`;
       const target = sessions[num - 1];
       if (target.type === "terminal") {
         handleKillTerminalSession(target).catch((err) => {
-          process.stderr.write(`[whazaa-watch] /kill: unhandled error — ${err}\n`);
+          log(`/kill: unhandled error — ${err}`);
         });
       } else {
         handleKillSession(target).catch((err) => {
-          process.stderr.write(`[whazaa-watch] /kill: unhandled error — ${err}\n`);
+          log(`/kill: unhandled error — ${err}`);
         });
       }
       return;
