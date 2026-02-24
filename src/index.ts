@@ -137,22 +137,11 @@ server.registerTool("whatsapp_send", {
           voice: explicitVoice,
           jid: recipient,
         });
-        const dest = result.targetJid ?? "self-chat";
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Voice note sent to ${dest} (voice: ${result.voice}, ${result.bytesSent} bytes)`,
-            },
-          ],
-        };
+        return { content: [{ type: "text", text: "Sent." }] };
       }
 
-      const result = await watcher.send(message, recipient);
-      const dest = result.targetJid ?? "self-chat";
-      return {
-        content: [{ type: "text", text: `Sent to ${dest}: ${result.preview}` }],
-      };
+      await watcher.send(message, recipient);
+      return { content: [{ type: "text", text: "Sent." }] };
     } catch (err) {
       return errorResponse(err);
     }
@@ -193,15 +182,7 @@ server.registerTool("whatsapp_tts", {
         voice: voice,
         jid: recipient,
       });
-      const dest = result.targetJid ?? "self-chat";
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Voice note sent to ${dest} (voice: ${result.voice}, ${result.bytesSent} bytes)`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: "Sent." }] };
     } catch (err) {
       return errorResponse(err);
     }
@@ -217,10 +198,8 @@ server.registerTool("whatsapp_send_file", {
   },
 }, async ({ filePath, recipient, caption }) => {
     try {
-      const result = await watcher.sendFile(filePath, recipient, caption);
-      return {
-        content: [{ type: "text" as const, text: `Sent: ${result.fileName} (${result.fileSize} bytes) to ${result.targetJid}` }],
-      };
+      await watcher.sendFile(filePath, recipient, caption);
+      return { content: [{ type: "text", text: "Sent." }] };
     } catch (err) {
       return errorResponse(err);
     }
