@@ -31,12 +31,9 @@ import { execFile } from "node:child_process";
 import { downloadMediaMessage, proto } from "@whiskeysockets/baileys";
 import type makeWASocket from "@whiskeysockets/baileys";
 import pino from "pino";
+import { log } from "./log.js";
 
 const execFileAsync = promisify(execFile);
-
-// ---------------------------------------------------------------------------
-// Image download helper
-// ---------------------------------------------------------------------------
 
 /**
  * Map a WhatsApp image mimetype to a sensible file extension.
@@ -79,17 +76,13 @@ export async function downloadImageToTemp(
     );
 
     writeFileSync(filePath, buffer as Buffer);
-    process.stderr.write(`[whazaa-watch] Image saved to ${filePath}\n`);
+    log(`Image saved to ${filePath}`);
     return filePath;
   } catch (err) {
-    process.stderr.write(`[whazaa-watch] Image download failed: ${err}\n`);
+    log(`Image download failed: ${err}`);
     return null;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Audio download and transcription helper
-// ---------------------------------------------------------------------------
 
 /**
  * Absolute path to the `whisper` CLI binary used for audio transcription.
@@ -145,7 +138,7 @@ export async function downloadAudioAndTranscribe(
   ];
 
   try {
-    process.stderr.write(`[whazaa-watch] Downloading audio (${duration}s, ptt=${isPtt})...\n`);
+    log(`Downloading audio (${duration}s, ptt=${isPtt})...`);
 
     const buffer = await downloadMediaMessage(
       msg as Parameters<typeof downloadMediaMessage>[0],
@@ -158,7 +151,7 @@ export async function downloadAudioAndTranscribe(
     );
 
     writeFileSync(audioFile, buffer as Buffer);
-    process.stderr.write(`[whazaa-watch] Audio saved to ${audioFile}, running Whisper (${WHISPER_BIN}, model=${WHISPER_MODEL})...\n`);
+    log(`Audio saved to ${audioFile}, running Whisper (${WHISPER_BIN}, model=${WHISPER_MODEL})...`);
 
     // Run Whisper with a 120-second timeout.
     // Pass an expanded PATH so Whisper can find ffmpeg even when launched from
@@ -178,16 +171,16 @@ export async function downloadAudioAndTranscribe(
     // Whisper writes <basename>.txt in the output_dir
     const txtPath = join(tmpdir(), `${audioBase}.txt`);
     if (!existsSync(txtPath)) {
-      process.stderr.write(`[whazaa-watch] Whisper did not produce output at ${txtPath}\n`);
+      log(`Whisper did not produce output at ${txtPath}`);
       return null;
     }
 
     const transcript = readFileSync(txtPath, "utf-8").trim();
-    process.stderr.write(`[whazaa-watch] Transcription: ${transcript.slice(0, 80)}\n`);
+    log(`Transcription: ${transcript.slice(0, 80)}`);
 
     return `${label}: ${transcript}`;
   } catch (err) {
-    process.stderr.write(`[whazaa-watch] Audio transcription failed: ${err}\n`);
+    log(`Audio transcription failed: ${err}`);
     return null;
   } finally {
     // Always clean up all Whisper output artifacts

@@ -46,7 +46,6 @@ export interface IpcRequest {
 export interface IpcResponse {
   /** Must equal the `id` of the originating {@link IpcRequest}. */
   id: string;
-  /** Whether the method completed without error. */
   ok: boolean;
   /** Method-specific result payload, present when `ok` is true. */
   result?: Record<string, unknown>;

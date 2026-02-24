@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 /**
- * @module index
- *
  * Whazaa MCP server — entry point and tool registrations.
  *
  * This file is the executable that Claude Code (or any MCP host) launches to
@@ -59,9 +57,10 @@ import { WatcherClient, ChatsResult, DiscoverResult, HistoryResult, TtsResult, V
 import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
-// ---------------------------------------------------------------------------
-// MCP server setup
-// ---------------------------------------------------------------------------
+function errorResponse(err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
+}
 
 const server = new McpServer({
   name: "whazaa",
@@ -72,12 +71,6 @@ const server = new McpServer({
 // identified by TERM_SESSION_ID (set by iTerm2).
 const watcher = new WatcherClient();
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_status
-// ---------------------------------------------------------------------------
-
-// Reports whether the watcher is connected, awaiting a QR scan, or
-// disconnected. Returns the authenticated phone number when connected.
 server.registerTool("whatsapp_status", {
   description: "Check the Whazaa connection state and the WhatsApp phone number it is logged in as.",
   inputSchema: {},
@@ -98,22 +91,11 @@ server.registerTool("whatsapp_status", {
 
       return { content: [{ type: "text", text }] };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_send
-// ---------------------------------------------------------------------------
-
-// Sends a WhatsApp text message (or TTS voice note when `voice` is set).
-// Recipient defaults to self-chat when omitted. Supports basic Markdown and
-// accepts phone numbers, JIDs, or contact names as the recipient identifier.
 server.registerTool("whatsapp_send", {
   description: [
     "Send a WhatsApp message.",
@@ -172,23 +154,11 @@ server.registerTool("whatsapp_send", {
         content: [{ type: "text", text: `Sent to ${dest}: ${result.preview}` }],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_tts
-// ---------------------------------------------------------------------------
-
-// Dedicated TTS tool: converts text to a Kokoro voice note and sends it via
-// WhatsApp. Runs entirely locally (no cloud API). The ~160 MB Kokoro model is
-// downloaded on first use and cached. Voice defaults to the configured default
-// when omitted.
 server.registerTool("whatsapp_tts", {
   description: [
     "Convert text to speech and send as a WhatsApp voice note.",
@@ -233,22 +203,11 @@ server.registerTool("whatsapp_tts", {
         ],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_send_file
-// ---------------------------------------------------------------------------
-
-// Sends an arbitrary file (PDF, image, video, audio, document, etc.) as a
-// WhatsApp attachment. The file is read from an absolute path on disk and
-// forwarded to the watcher, which handles MIME detection and Baileys upload.
 server.registerTool("whatsapp_send_file", {
   description: "Send a file (document, image, video, audio) via WhatsApp. Supports any file type — PDFs, Word docs, images, videos, etc.",
   inputSchema: {
@@ -263,23 +222,11 @@ server.registerTool("whatsapp_send_file", {
         content: [{ type: "text" as const, text: `Sent: ${result.fileName} (${result.fileSize} bytes) to ${result.targetJid}` }],
       };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text" as const, text: `Failed to send file: ${msg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_receive
-// ---------------------------------------------------------------------------
-
-// Drains the in-memory message queue for this MCP session and returns the
-// accumulated messages since the last call, then clears the queue. Scope
-// can be restricted to self-chat (default), a specific contact/JID, or all
-// chats simultaneously via the `from` parameter.
 server.registerTool("whatsapp_receive", {
   description: [
     "Return queued incoming WhatsApp messages since the last call, then clear the queue.",
@@ -314,23 +261,11 @@ server.registerTool("whatsapp_receive", {
 
       return { content: [{ type: "text", text: formatted }] };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_contacts
-// ---------------------------------------------------------------------------
-
-// Returns the list of contacts that have exchanged messages in this Baileys
-// session, ordered by most-recently-seen. Supports optional substring search
-// across name and phone number. Returns JIDs suitable for use with
-// whatsapp_send and whatsapp_receive.
 server.registerTool("whatsapp_contacts", {
   description: [
     "List recently seen WhatsApp contacts.",
@@ -377,24 +312,11 @@ server.registerTool("whatsapp_contacts", {
         ],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_chats
-// ---------------------------------------------------------------------------
-
-// Lists WhatsApp chat conversations (inbox). Prefers the WhatsApp Desktop
-// macOS SQLite database for a complete, always-up-to-date view that works
-// even when the phone is offline. Falls back to the Baileys in-memory store
-// (typically ~100-150 chats synced at connect time) when the Desktop DB is
-// not available.
 server.registerTool("whatsapp_chats", {
   description: [
     "List WhatsApp chat conversations (inbox).",
@@ -475,23 +397,11 @@ server.registerTool("whatsapp_chats", {
         ],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_wait
-// ---------------------------------------------------------------------------
-
-// Long-polls the watcher for the next incoming message. Blocks (server-side)
-// until a message arrives or the configurable timeout elapses. Preferred over
-// a polling loop with whatsapp_receive — one blocking call instead of many
-// round-trips.
 server.registerTool("whatsapp_wait", {
   description: [
     "Wait for the next incoming WhatsApp message.",
@@ -525,23 +435,11 @@ server.registerTool("whatsapp_wait", {
 
       return { content: [{ type: "text", text: formatted }] };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_login
-// ---------------------------------------------------------------------------
-
-// Instructs the watcher to start a fresh QR-code pairing flow. Useful when
-// the WhatsApp session has expired, been revoked, or when the user wants to
-// link a different phone number. The QR code is printed to the watcher's
-// stderr — the user must check the terminal where the watcher runs.
 server.registerTool("whatsapp_login", {
   description: [
     "Trigger a new WhatsApp QR pairing flow.",
@@ -557,23 +455,11 @@ server.registerTool("whatsapp_login", {
         content: [{ type: "text", text: result.message }],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_history
-// ---------------------------------------------------------------------------
-
-// Fetches historical messages for a specific chat. Tries the WhatsApp Desktop
-// macOS SQLite database first (offline-capable, no anchor message needed).
-// Falls back to an on-demand Baileys fetch from the phone when the Desktop DB
-// is unavailable. Accepts both full JIDs and bare phone numbers.
 server.registerTool("whatsapp_history", {
   description: [
     "Fetch message history for a WhatsApp chat.",
@@ -645,23 +531,11 @@ server.registerTool("whatsapp_history", {
         ],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_voice_config
-// ---------------------------------------------------------------------------
-
-// Gets or sets the persistent TTS voice configuration stored in the watcher.
-// Covers: voice mode (text vs. voice notes), local speaker mode, the default
-// Kokoro voice, and persona-to-voice mappings. Use action='get' to read the
-// current config and action='set' to update one or more fields atomically.
 server.registerTool("whatsapp_voice_config", {
   description: [
     "Get or set voice mode configuration.",
@@ -725,23 +599,11 @@ server.registerTool("whatsapp_voice_config", {
         ],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_speak
-// ---------------------------------------------------------------------------
-
-// Synthesises speech with Kokoro TTS and plays it through the Mac's local
-// speakers (via Core Audio / afplay). Audio plays in the background and does
-// not block subsequent tool calls. Use this for local voice feedback instead
-// of sending a WhatsApp voice note.
 server.registerTool("whatsapp_speak", {
   description: [
     "Speak text aloud through the Mac's speakers using Kokoro TTS.",
@@ -774,23 +636,11 @@ server.registerTool("whatsapp_speak", {
         content: [{ type: "text", text: `Speaking aloud (voice: ${result.voice})` }],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_rename
-// ---------------------------------------------------------------------------
-
-// Renames the current Claude session. Writes the new name into the watcher's
-// session registry, updates the iTerm2 tab title via AppleScript, and persists
-// the name in the iTerm2 `user.paiName` session variable so it survives
-// watcher restarts and appears in `/s` session listings.
 server.registerTool("whatsapp_rename", {
   description: "Rename this Claude session. Updates the session name in the watcher registry, the iTerm2 tab title, and the persistent session variable. The new name appears in /s listings and the status bar.",
   inputSchema: {
@@ -812,24 +662,11 @@ server.registerTool("whatsapp_rename", {
         content: [{ type: "text", text: `Session renamed to "${result.name}"` }],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_restart
-// ---------------------------------------------------------------------------
-
-// Restarts the launchd-managed Whazaa watcher service
-// (`com.whazaa.watcher`). Before issuing the launchctl kickstart, the tool
-// scans running processes for rogue manual watcher instances (not managed by
-// launchd) and SIGTERMs them to prevent session-conflict errors (code 440
-// connectionReplaced). Returns the new watcher PID on success.
 server.registerTool("whatsapp_restart", {
   description: [
     "Safely restart the Whazaa watcher service managed by launchd (com.whazaa.watcher).",
@@ -944,23 +781,11 @@ server.registerTool("whatsapp_restart", {
         content: [{ type: "text", text: lines.join("\n") }],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Tool: whatsapp_discover
-// ---------------------------------------------------------------------------
-
-// Re-scans all iTerm2 tabs for the `user.paiName` session variable and
-// refreshes the watcher's session registry. Prunes entries for closed tabs
-// (dead sessions) and registers newly discovered ones. Useful after a watcher
-// restart or when `/s` shows stale or missing sessions.
 server.registerTool("whatsapp_discover", {
   description: [
     "Re-scan iTerm2 sessions and update the session registry.",
@@ -990,35 +815,14 @@ server.registerTool("whatsapp_discover", {
         content: [{ type: "text", text: lines.join("\n") }],
       };
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text", text: `Error: ${errMsg}` }],
-        isError: true,
-      };
+      return errorResponse(err);
     }
   }
 );
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
 /**
- * Entry point for the Whazaa process.
- *
- * Dispatches to one of four modes based on `process.argv`:
- *
- * - `setup`   — Runs the interactive setup wizard and exits.
- * - `uninstall` — Removes all Whazaa config/credentials and exits.
- * - `watch [sessionId]` — Starts the long-running watcher daemon that owns
- *   the Baileys WebSocket connection. `sessionId` is an optional iTerm2
- *   session identifier used to route incoming messages to the correct queue.
- * - *(default)* — Starts the MCP server over stdio. Registers this session
- *   with the watcher (non-fatal if the watcher is not yet running) and then
- *   attaches the `StdioServerTransport` so Claude Code can call the tools.
- *
- * @returns A promise that resolves when the MCP transport is connected, or
- *   rejects with a fatal error (written to stderr and `process.exit(1)`).
+ * Entry point. Dispatches to setup, uninstall, watch, or MCP server mode
+ * based on `process.argv`.
  */
 async function main(): Promise<void> {
   if (process.argv.includes("setup")) {

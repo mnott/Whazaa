@@ -1,8 +1,5 @@
 /**
- * @file iterm-sessions.ts
- * @module watcher/iterm-sessions
- *
- * Higher-level iTerm2 session management.
+ * iterm-sessions.ts — Higher-level iTerm2 session management.
  *
  * This module sits one layer above `iterm-core` and provides the business
  * logic for managing Claude Code sessions inside iTerm2. It handles:
@@ -37,7 +34,10 @@ import {
   isItermSessionAlive,
   typeIntoSession,
   sendKeystrokeToSession,
+  stripItermPrefix,
+  withSessionAppleScript,
 } from "./iterm-core.js";
+import { log } from "./log.js";
 import {
   sessionRegistry,
   managedSessions,
@@ -51,6 +51,35 @@ import { watcherSendMessage } from "./send.js";
 // ---------------------------------------------------------------------------
 
 /**
+ * Shared inner helper for `setItermSessionVar` and `setItermTabName`.
+ *
+ * Builds and runs an AppleScript that finds the session by UUID and executes
+ * `body` inside a `tell aSession` block. Uses `execSync` with a heredoc
+ * because `execSync` tolerates longer string arguments without the size
+ * limitations that can affect `spawnSync` on some macOS versions.
+ *
+ * Silently no-ops on any error.
+ *
+ * @param itermSessionId - The iTerm2 session UUID to target.
+ * @param body - The AppleScript statement(s) to execute inside `tell aSession`.
+ */
+function setItermSessionProperty(itermSessionId: string, body: string): void {
+  try {
+    const script = withSessionAppleScript(
+      itermSessionId,
+      `          tell aSession\n            ${body}\n          end tell\n          return`,
+      ""
+    );
+    execSync(`osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`, {
+      timeout: 5000,
+      shell: "/bin/bash",
+    });
+  } catch {
+    // silently ignore
+  }
+}
+
+/**
  * Persist a human-readable label as the `user.paiName` session variable on an
  * iTerm2 session.
  *
@@ -59,40 +88,14 @@ import { watcherSendMessage } from "./send.js";
  * watcher to recover the label after a restart or tab-title change by calling
  * `getItermSessionVar`.
  *
- * Uses `execSync` with a heredoc rather than `runAppleScript` because
- * `execSync` tolerates longer string arguments without size limitations that
- * can affect `spawnSync` on some macOS versions.
- *
  * @param itermSessionId - The iTerm2 session UUID to write to.
  * @param name - The label to store. Newlines are replaced with spaces, and
  *   backslashes/double-quotes are escaped before embedding in AppleScript.
  *   Silently no-ops on any error (iTerm2 not running, session not found, etc.).
  */
 export function setItermSessionVar(itermSessionId: string, name: string): void {
-  try {
-    const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\n\r]/g, " ");
-    const escapedId = itermSessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    const script = `tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${escapedId}" then
-          tell aSession
-            set variable named "user.paiName" to "${escaped}"
-          end tell
-          return
-        end if
-      end repeat
-    end repeat
-  end repeat
-end tell`;
-    execSync(`osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`, {
-      timeout: 5000,
-      shell: "/bin/bash",
-    });
-  } catch {
-    // silently ignore
-  }
+  const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\n\r]/g, " ");
+  setItermSessionProperty(itermSessionId, `set variable named "user.paiName" to "${escaped}"`);
 }
 
 /**
@@ -112,30 +115,8 @@ end tell`;
  *   spaces; backslashes and double-quotes are escaped for AppleScript.
  */
 export function setItermTabName(itermSessionId: string, name: string): void {
-  try {
-    const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\n\r]/g, " ");
-    const escapedId = itermSessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    const script = `tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${escapedId}" then
-          tell aSession
-            set name to "${escaped}"
-          end tell
-          return
-        end if
-      end repeat
-    end repeat
-  end repeat
-end tell`;
-    execSync(`osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`, {
-      timeout: 5000,
-      shell: "/bin/bash",
-    });
-  } catch {
-    // silently ignore
-  }
+  const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\n\r]/g, " ");
+  setItermSessionProperty(itermSessionId, `set name to "${escaped}"`);
 }
 
 /**
@@ -154,25 +135,11 @@ end tell`;
  */
 export function getItermSessionVar(itermSessionId: string): string | null {
   try {
-    const escaped = itermSessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    const script = `tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${escaped}" then
-          tell aSession
-            try
-              return (variable named "user.paiName")
-            on error
-              return ""
-            end try
-          end tell
-        end if
-      end repeat
-    end repeat
-  end repeat
-  return ""
-end tell`;
+    const script = withSessionAppleScript(
+      itermSessionId,
+      `          tell aSession\n            try\n              return (variable named "user.paiName")\n            on error\n              return ""\n            end try\n          end tell`,
+      'return ""'
+    );
     const result = execSync(`osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`, {
       timeout: 5000,
       encoding: "utf8",
@@ -217,8 +184,7 @@ export function findItermSessionForTermId(
   // before the colon because AppleScript's `id of aSession` returns just
   // the bare UUID.
   if (itermSessionIdHint) {
-    const colonIdx = itermSessionIdHint.lastIndexOf(":");
-    return colonIdx >= 0 ? itermSessionIdHint.slice(colonIdx + 1) : itermSessionIdHint;
+    return stripItermPrefix(itermSessionIdHint) ?? itermSessionIdHint;
   }
 
   // Otherwise scan all iTerm2 sessions for a matching TERM_SESSION_ID
@@ -303,7 +269,7 @@ export function createClaudeSession(): string | null {
   const home = homedir();
 
   if (!isItermRunning()) {
-    process.stderr.write("[whazaa-watch] iTerm2 not running, launching...\n");
+    log("iTerm2 not running, launching...");
     spawnSync("open", ["-a", "iTerm"], { timeout: 10_000 });
     for (let i = 0; i < 10; i++) {
       spawnSync("sleep", ["1"]);
@@ -336,15 +302,12 @@ end tell`;
 
   const sessionId = runAppleScript(createScript);
   if (!sessionId) {
-    process.stderr.write("[whazaa-watch] Failed to create new iTerm2 tab\n");
+    log("Failed to create new iTerm2 tab");
     return null;
   }
 
-  process.stderr.write(
-    `[whazaa-watch] Created new claude session: ${sessionId}\n`
-  );
-
-  process.stderr.write("[whazaa-watch] Waiting for Claude Code to start...\n");
+  log(`Created new claude session: ${sessionId}`);
+  log("Waiting for Claude Code to start...");
   spawnSync("sleep", ["8"]);
 
   return sessionId;
@@ -396,9 +359,7 @@ end tell`;
     const sessionPath = parts[2];
 
     if (name.includes("claude") && sessionPath === targetDir) {
-      process.stderr.write(
-        `[whazaa-watch] Found existing Claude session in ${targetDir}: ${id}\n`
-      );
+      log(`Found existing Claude session in ${targetDir}: ${id}`);
       return id;
     }
   }
@@ -445,7 +406,7 @@ export function expandTilde(p: string): string {
  */
 export function handleTerminal(commandOrNull: string | null): void {
   const command = commandOrNull?.trim() || null;
-  process.stderr.write(`[whazaa-watch] /t -> ${command ?? "(plain terminal)"}\n`);
+  log(`/t -> ${command ?? "(plain terminal)"}`);
 
   // Build AppleScript: open a new tab (plain shell, default profile),
   // optionally run the command, and return the session ID.
@@ -475,7 +436,7 @@ end tell`;
 
   const result = runAppleScript(script);
   if (result === null) {
-    process.stderr.write("[whazaa-watch] /t: failed to open terminal tab\n");
+    log("/t: failed to open terminal tab");
     watcherSendMessage("Failed to open terminal tab.").catch(() => {});
     return;
   }
@@ -490,7 +451,7 @@ end tell`;
   // Persist the name in iTerm2 session variable for recovery across watcher restarts
   setItermSessionVar(result, label);
 
-  process.stderr.write(`[whazaa-watch] /t: opened terminal "${label}" (session ${result})\n`);
+  log(`/t: opened terminal "${label}" (session ${result})`);
   watcherSendMessage(`Opened terminal *${label}* ← active`).catch(() => {});
 }
 
@@ -512,7 +473,7 @@ end tell`;
  *   or `null` if opening a new tab failed.
  */
 export function handleRelocate(targetPath: string): string | null {
-  process.stderr.write(`[whazaa-watch] /relocate -> ${targetPath}\n`);
+  log(`/relocate -> ${targetPath}`);
 
   const expandedPath = expandTilde(targetPath);
 
@@ -537,10 +498,10 @@ end tell`;
 
     const focusResult = runAppleScript(focusScript);
     if (focusResult === "focused") {
-      process.stderr.write(`[whazaa-watch] /relocate: focused existing session ${existingSession} in ${targetPath}\n`);
+      log(`/relocate: focused existing session ${existingSession} in ${targetPath}`);
       return existingSession;
     }
-    process.stderr.write(`[whazaa-watch] /relocate: session ${existingSession} vanished, opening new tab\n`);
+    log(`/relocate: session ${existingSession} vanished, opening new tab`);
   }
 
   const escapedPath = expandedPath.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -568,10 +529,10 @@ end tell`;
 
   const result = runAppleScript(script);
   if (result === null) {
-    process.stderr.write("[whazaa-watch] /relocate: failed to open new iTerm2 tab\n");
+    log("/relocate: failed to open new iTerm2 tab");
     return null;
   }
-  process.stderr.write(`[whazaa-watch] /relocate: opened new tab in ${targetPath} (session ${result})\n`);
+  log(`/relocate: opened new tab in ${targetPath} (session ${result})`);
   return result;
 }
 
@@ -763,7 +724,7 @@ export async function handleKillSession(
   target: { id: string; name: string; path: string }
 ): Promise<void> {
   await watcherSendMessage(`Killing Claude in session "${target.name}"...`).catch(() => {});
-  process.stderr.write(`[whazaa-watch] /kill: targeting session ${target.id} ("${target.name}")\n`);
+  log(`/kill: targeting session ${target.id} ("${target.name}")`);
 
   // Get the TTY of the target session
   const ttyScript = `
@@ -812,12 +773,12 @@ end tell`;
     return;
   }
 
-  process.stderr.write(`[whazaa-watch] /kill: found Claude PID ${claudePid} on ${tty}\n`);
+  log(`/kill: found Claude PID ${claudePid} on ${tty}`);
 
   // Kill the Claude process
   const killResult = spawnSync("kill", ["-TERM", claudePid], { timeout: 5000 });
   if (killResult.status !== 0) {
-    process.stderr.write(`[whazaa-watch] /kill: SIGTERM failed, trying SIGKILL\n`);
+    log("/kill: SIGTERM failed, trying SIGKILL");
     spawnSync("kill", ["-KILL", claudePid], { timeout: 5000 });
   }
 
@@ -832,7 +793,7 @@ end tell`;
   }
 
   if (!atPrompt) {
-    process.stderr.write(`[whazaa-watch] /kill: session not at prompt after 10s, sending SIGKILL\n`);
+    log("/kill: session not at prompt after 10s, sending SIGKILL");
     spawnSync("kill", ["-KILL", claudePid], { timeout: 5000 });
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -846,7 +807,7 @@ end tell`;
   const paiName = getItermSessionVar(target.id);
   const label = paiName ?? (target.path ? basename(target.path) : target.name);
   await watcherSendMessage(`Killed and restarted Claude in *${label}*`).catch(() => {});
-  process.stderr.write(`[whazaa-watch] /kill: restarted Claude in session ${target.id}\n`);
+  log(`/kill: restarted Claude in session ${target.id}`);
 }
 
 /**
@@ -872,7 +833,7 @@ export async function handleKillTerminalSession(
   target: { id: string; name: string; path: string; type: "claude" | "terminal" }
 ): Promise<void> {
   await watcherSendMessage(`Closing terminal session "${target.name}"...`).catch(() => {});
-  process.stderr.write(`[whazaa-watch] /kill: closing terminal session ${target.id} ("${target.name}")\n`);
+  log(`/kill: closing terminal session ${target.id} ("${target.name}")`);
 
   // Send Ctrl+C to interrupt any running process
   sendKeystrokeToSession(target.id, 3);
@@ -898,7 +859,7 @@ end tell`;
 
   const result = runAppleScript(closeScript);
   if (result !== "ok") {
-    process.stderr.write(`[whazaa-watch] /kill: could not close tab for session ${target.id} (result: ${result})\n`);
+    log(`/kill: could not close tab for session ${target.id} (result: ${result})`);
   }
 
   // Remove from managedSessions registry

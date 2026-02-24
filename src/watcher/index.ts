@@ -1,6 +1,5 @@
 /**
- * @module watcher/index
- * @file watcher/index.ts — Watcher entry point; wires all modules together
+ * watcher/index.ts — Watcher entry point; wires all modules together
  *
  * This is the top-level composition root for the `whazaa watch` command.  It
  * is the only module that `src/index.ts` imports from the watcher sub-package,
@@ -62,17 +61,12 @@ import { createMessageHandler } from "./commands.js";
  * Start the Whazaa watcher — the long-running process that bridges WhatsApp
  * and iTerm2 Claude Code sessions.
  *
- * This function never resolves under normal operation; it suspends the event
- * loop via `await new Promise(() => {})` so Node.js continues processing I/O
- * events (WhatsApp WebSocket, IPC server connections, timers).  The process
- * exits only when a SIGINT or SIGTERM signal is received.
+ * Suspends the event loop indefinitely via `await new Promise(() => {})`;
+ * exits only on SIGINT or SIGTERM.
  *
- * @param rawSessionId - Optional iTerm2 session identifier passed from the
- *   CLI, typically the value of `$TERM_SESSION_ID` or `$ITERM_SESSION_ID`.
- *   Accepted formats: bare UUID (`A1B2C3-…`) or the iTerm2 compound form
- *   `w0t2p0:UUID`.  When provided, the watcher immediately targets that
- *   session for message delivery instead of auto-discovering a Claude session.
- *   When omitted, auto-discovery runs on the first incoming message.
+ * @param rawSessionId - Optional iTerm2 session identifier (`$TERM_SESSION_ID`
+ *   or `$ITERM_SESSION_ID`). Accepted formats: bare UUID or `w0t2p0:UUID`.
+ *   When omitted, session auto-discovery runs on the first incoming message.
  */
 export async function watch(rawSessionId?: string): Promise<void> {
   let activeSessionId = rawSessionId

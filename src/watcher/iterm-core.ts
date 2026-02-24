@@ -1,24 +1,14 @@
 /**
- * @file iterm-core.ts
- * @module watcher/iterm-core
+ * iterm-core.ts — Low-level iTerm2 AppleScript primitives.
  *
- * Low-level iTerm2 AppleScript primitives.
- *
- * This module is the foundation of all iTerm2 communication in the watcher.
- * It exposes a thin set of synchronous helpers that wrap `osascript` and
- * `spawnSync` to interact with the iTerm2 application. Every higher-level
- * session-management function in `iterm-sessions.ts` ultimately calls into
- * this module.
- *
- * Design constraints:
- * - Zero imports from the rest of the Whazaa project — pure utilities only.
- * - All AppleScript execution is synchronous (`spawnSync`) so callers can use
- *   simple boolean/string return values without async plumbing.
- * - Functions return `null` or `false` on failure rather than throwing, so
- *   callers can handle "iTerm2 not available" gracefully.
+ * Foundation of all iTerm2 communication in the watcher. Wraps `osascript`
+ * and `spawnSync` with zero project-level imports so it is safe to import
+ * from any other watcher module. All calls are synchronous; functions return
+ * null/false on failure rather than throwing.
  */
 
 import { spawnSync } from "node:child_process";
+import { log } from "./log.js";
 
 /**
  * Execute an AppleScript program via `osascript` and return its stdout.
@@ -43,6 +33,41 @@ export function runAppleScript(script: string): string | null {
 }
 
 /**
+ * Strip the "w0t2p0:" prefix from TERM_SESSION_ID to get the bare UUID
+ * that iTerm2's AppleScript `id of aSession` returns.
+ */
+export function stripItermPrefix(id: string | undefined): string | undefined {
+  if (!id) return id;
+  const colonIdx = id.lastIndexOf(":");
+  return colonIdx >= 0 ? id.slice(colonIdx + 1) : id;
+}
+
+/**
+ * Build an AppleScript snippet that finds an iTerm2 session by UUID and
+ * executes a body script in its context. The body receives `aSession`,
+ * `aTab`, and `aWindow` variables.
+ *
+ * @param sessionId - The iTerm2 session UUID (will be escaped)
+ * @param body - AppleScript lines to execute when the session is found
+ * @param fallback - AppleScript to execute if the session is not found (default: 'return ""')
+ */
+export function withSessionAppleScript(sessionId: string, body: string, fallback = 'return ""'): string {
+  const escaped = sessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${escaped}" then
+${body}
+        end if
+      end repeat
+    end repeat
+  end repeat
+  ${fallback}
+end tell`;
+}
+
+/**
  * Send a single ASCII keystroke to a specific iTerm2 session without a
  * trailing newline.
  *
@@ -57,21 +82,11 @@ export function runAppleScript(script: string): string | null {
  *   call failed.
  */
 export function sendKeystrokeToSession(sessionId: string, asciiCode: number): boolean {
-  const script = `
-tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${sessionId}" then
-          tell aSession to write text (ASCII character ${asciiCode}) newline no
-          return "ok"
-        end if
-      end repeat
-    end repeat
-  end repeat
-  return "not_found"
-end tell`;
-
+  const script = withSessionAppleScript(
+    sessionId,
+    `          tell aSession to write text (ASCII character ${asciiCode}) newline no\n          return "ok"`,
+    'return "not_found"'
+  );
   const result = runAppleScript(script);
   return result === "ok";
 }
@@ -93,21 +108,11 @@ end tell`;
  *   `false` otherwise.
  */
 export function sendEscapeSequenceToSession(sessionId: string, dirChar: string): boolean {
-  const script = `
-tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${sessionId}" then
-          tell aSession to write text (ASCII character 27) & "[${dirChar}" newline no
-          return "ok"
-        end if
-      end repeat
-    end repeat
-  end repeat
-  return "not_found"
-end tell`;
-
+  const script = withSessionAppleScript(
+    sessionId,
+    `          tell aSession to write text (ASCII character 27) & "[${dirChar}" newline no\n          return "ok"`,
+    'return "not_found"'
+  );
   const result = runAppleScript(script);
   return result === "ok";
 }
@@ -133,20 +138,11 @@ end tell`;
 export function typeIntoSession(sessionId: string, text: string): boolean {
   const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
-  const textScript = `
-tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${sessionId}" then
-          tell aSession to write text "${escaped}" newline no
-          return "ok"
-        end if
-      end repeat
-    end repeat
-  end repeat
-  return "not_found"
-end tell`;
+  const textScript = withSessionAppleScript(
+    sessionId,
+    `          tell aSession to write text "${escaped}" newline no\n          return "ok"`,
+    'return "not_found"'
+  );
 
   const result = runAppleScript(textScript);
   if (result !== "ok") return false;
@@ -198,9 +194,7 @@ end tell`;
     const name = line.substring(tabIdx + 1).toLowerCase();
 
     if (name.includes("claude")) {
-      process.stderr.write(
-        `[whazaa-watch] Found claude session: ${id} ("${line.substring(tabIdx + 1)}")\n`
-      );
+      log(`Found claude session: ${id} ("${line.substring(tabIdx + 1)}")`);
       return id;
     }
   }
@@ -225,36 +219,20 @@ end tell`;
  *   `false` if the session is at a shell prompt or was not found.
  */
 export function isClaudeRunningInSession(sessionId: string): boolean {
-  const script = `
-tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${sessionId}" then
-          if (is at shell prompt of aSession) then
-            return "shell"
-          else
-            return "running"
-          end if
-        end if
-      end repeat
-    end repeat
-  end repeat
-  return "not_found"
-end tell`;
+  const script = withSessionAppleScript(
+    sessionId,
+    `          if (is at shell prompt of aSession) then\n            return "shell"\n          else\n            return "running"\n          end if`,
+    'return "not_found"'
+  );
 
   const result = runAppleScript(script);
   if (result === "running") {
     return true;
   }
   if (result === "shell") {
-    process.stderr.write(
-      `[whazaa-watch] Session ${sessionId} is at shell prompt — Claude has exited.\n`
-    );
+    log(`Session ${sessionId} is at shell prompt — Claude has exited.`);
   } else {
-    process.stderr.write(
-      `[whazaa-watch] Session ${sessionId} not found in iTerm2.\n`
-    );
+    log(`Session ${sessionId} not found in iTerm2.`);
   }
   return false;
 }
@@ -294,16 +272,10 @@ export function isItermRunning(): boolean {
  *   `false` if it does not exist or if the AppleScript call fails.
  */
 export function isItermSessionAlive(sessionId: string): boolean {
-  const escaped = sessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  const script = `tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${escaped}" then return "alive"
-      end repeat
-    end repeat
-  end repeat
-  return "gone"
-end tell`;
+  const script = withSessionAppleScript(
+    sessionId,
+    `          return "alive"`,
+    'return "gone"'
+  );
   return runAppleScript(script) === "alive";
 }

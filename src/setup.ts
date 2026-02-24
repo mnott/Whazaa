@@ -1,6 +1,4 @@
 /**
- * @module setup
- *
  * Interactive CLI operations for Whazaa: setup wizard and uninstall.
  *
  * This module is invoked when the user runs `npx whazaa setup` or
@@ -39,10 +37,6 @@ import {
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 
-// ---------------------------------------------------------------------------
-// Setup wizard
-// ---------------------------------------------------------------------------
-
 /**
  * Open a URL in the user's default browser, platform-agnostic.
  *
@@ -63,28 +57,9 @@ export function openBrowser(url: string): void {
 }
 
 /**
- * Run the interactive Whazaa setup wizard.
- *
- * This is the entry point for `npx whazaa setup`. It walks the user through
- * four steps:
- *
- * 1. **MCP config** — Adds the `whazaa` server entry to `~/.claude/.mcp.json`,
- *    creating the file (and its parent directory) if necessary.
- * 2. **Skill install** — Writes the `/name` skill SKILL.md to
- *    `~/.claude/skills/Name/` so Claude Code can rename sessions with
- *    `whatsapp_rename`.
- * 3. **Session check** — If a `creds.json` already exists in the Baileys auth
- *    directory, attempts to verify the live connection. Exits early when the
- *    session is still valid; clears credentials and re-pairs when it is not.
- * 4. **QR pairing** — Triggers a new WhatsApp login, waits for the user to
- *    scan the QR code, then gives Baileys 5 seconds to finish syncing before
- *    exiting with a success message.
- *
- * Pass `--force` / `-f` on the command line to skip the session check and
- * always re-pair, clearing any existing credentials first.
- *
- * @returns A promise that resolves (via `process.exit(0)`) after the wizard
- *   completes successfully.
+ * Run the interactive Whazaa setup wizard (`npx whazaa setup`).
+ * Configures ~/.claude/.mcp.json, installs the /name skill, verifies or
+ * performs QR pairing, and exits.
  */
 export async function setup(): Promise<void> {
   enableSetupMode();
@@ -239,30 +214,10 @@ export async function setup(): Promise<void> {
   process.exit(0);
 }
 
-// ---------------------------------------------------------------------------
-// Uninstall
-// ---------------------------------------------------------------------------
-
 /**
- * Uninstall Whazaa from the local machine.
- *
- * This is the entry point for `npx whazaa uninstall`. It performs three
- * cleanup steps in order:
- *
- * 1. **MCP config** — Removes the `whazaa` entry from `~/.claude/.mcp.json`
- *    and writes the updated file back. Does nothing if the entry does not
- *    exist or the file cannot be parsed.
- * 2. **Auth credentials** — Deletes the Baileys authentication directory
- *    (resolved by `resolveAuthDir`) so that the WhatsApp session is fully
- *    de-linked.
- * 3. **State directory** — Removes `~/.whazaa/` if it exists and is empty,
- *    leaving it in place if other files are still present.
- *
- * Always exits with `process.exit(0)` after completion so that the calling
- * shell script can detect success reliably.
- *
- * @returns A promise that resolves (via `process.exit(0)`) after all
- *   cleanup steps are complete.
+ * Remove Whazaa from the local machine (`npx whazaa uninstall`).
+ * Strips the MCP config entry, deletes auth credentials, and removes
+ * ~/.whazaa/ if empty.
  */
 export async function uninstall(): Promise<void> {
   console.log("Whazaa Uninstall\n");
