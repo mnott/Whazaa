@@ -118,6 +118,13 @@ let activeClientId: string | null = null;
  */
 let activeItermSessionId: string = "";
 
+/**
+ * Cached session list from the last /s call. Used by /N to ensure the
+ * session numbers match what was displayed. Cleared after 60 seconds.
+ */
+let cachedSessionList: Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> | null = null;
+let cachedSessionListTime = 0;
+
 /** Per-client incoming message queues, keyed by sessionId */
 const clientQueues = new Map<string, QueuedMessage[]>();
 
@@ -799,6 +806,32 @@ function sendResponse(socket: Socket, response: IpcResponse): void {
 }
 
 /**
+ * Return a session name that does not collide with any other entry in
+ * sessionRegistry. If `name` is already taken by a different session,
+ * appends " (2)", " (3)", etc. until a free slot is found.
+ *
+ * @param name             The desired session name.
+ * @param excludeSessionId The TERM_SESSION_ID of the session being registered
+ *                         or renamed — its own current name is not a collision.
+ */
+function deduplicateName(name: string, excludeSessionId: string): string {
+  const taken = new Set<string>();
+  for (const [sid, entry] of sessionRegistry) {
+    if (sid !== excludeSessionId) {
+      taken.add(entry.name);
+    }
+  }
+
+  if (!taken.has(name)) return name;
+
+  let n = 2;
+  while (taken.has(`${name} (${n})`)) {
+    n++;
+  }
+  return `${name} (${n})`;
+}
+
+/**
  * Handle a single IPC request and write the response back to the socket.
  */
 async function handleRequest(
@@ -813,10 +846,12 @@ async function handleRequest(
   if (method !== "register" && sessionId && !sessionRegistry.has(sessionId)) {
     // Use itermSessionId from the request (new clients), or extract UUID from
     // TERM_SESSION_ID which has format "w0t2p0:UUID" (same as ITERM_SESSION_ID)
+    // Extract iTerm UUID from the hint (string manipulation only — no AppleScript)
+    // to avoid blocking the event loop and causing Baileys WebSocket timeouts.
     const itermHint = request.itermSessionId ?? sessionId;
-    const itermId = findItermSessionForTermId(sessionId, itermHint);
-    const persistedName = itermId ? getItermSessionVar(itermId) : null;
-    const autoName = persistedName ?? "Unknown";
+    const colonIdx = itermHint.lastIndexOf(":");
+    const itermId = colonIdx >= 0 ? itermHint.slice(colonIdx + 1) : itermHint;
+    const autoName = "Unknown";
     sessionRegistry.set(sessionId, {
       sessionId,
       name: autoName,
@@ -838,7 +873,8 @@ async function handleRequest(
       // If this iTerm session has a persisted paiName (set by /N rename),
       // restore it — iTerm variables survive watcher restarts.
       const persistedName = itermId ? getItermSessionVar(itermId) : null;
-      const effectiveName = persistedName ?? name;
+      const rawName = persistedName ?? name;
+      const effectiveName = deduplicateName(rawName, sessionId);
 
       sessionRegistry.set(sessionId, {
         sessionId,
@@ -881,13 +917,14 @@ async function handleRequest(
       }
       const entry = sessionRegistry.get(sessionId);
       if (entry) {
-        entry.name = newName;
+        const dedupedName = deduplicateName(newName, sessionId);
+        entry.name = dedupedName;
         if (entry.itermSessionId) {
-          setItermSessionVar(entry.itermSessionId, newName);
-          setItermTabName(entry.itermSessionId, newName);
+          setItermSessionVar(entry.itermSessionId, dedupedName);
+          setItermTabName(entry.itermSessionId, dedupedName);
         }
-        process.stderr.write(`[whazaa-watch] IPC: renamed session ${sessionId} to "${newName}"\n`);
-        sendResponse(socket, { id, ok: true, result: { success: true, name: newName } });
+        process.stderr.write(`[whazaa-watch] IPC: renamed session ${sessionId} to "${dedupedName}"\n`);
+        sendResponse(socket, { id, ok: true, result: { success: true, name: dedupedName } });
       } else {
         sendResponse(socket, { id, ok: false, error: "Session not registered" });
       }
@@ -1488,6 +1525,88 @@ async function handleRequest(
       break;
     }
 
+    case "discover": {
+      const alive: string[] = [];
+      const pruned: string[] = [];
+      const discovered: string[] = [];
+
+      // Phase 1: Prune dead sessions from the registry
+      for (const [sid, entry] of sessionRegistry) {
+        if (!entry.itermSessionId || isItermSessionAlive(entry.itermSessionId)) {
+          alive.push(entry.name);
+        } else {
+          pruned.push(entry.name);
+          sessionRegistry.delete(sid);
+          clientQueues.delete(sid);
+          clientWaiters.delete(sid);
+          if (activeClientId === sid) {
+            activeClientId = null;
+          }
+          process.stderr.write(`[whazaa-watch] IPC: discover pruned dead session ${sid} ("${entry.name}")\n`);
+        }
+      }
+
+      // Also prune dead entries from managedSessions
+      for (const [msid, msEntry] of managedSessions) {
+        if (!isItermSessionAlive(msid)) {
+          pruned.push(msEntry.name);
+          managedSessions.delete(msid);
+          process.stderr.write(`[whazaa-watch] IPC: discover pruned dead managed session ${msid} ("${msEntry.name}")\n`);
+        }
+      }
+
+      // Phase 2: Scan ALL iTerm2 sessions for user.paiName variable.
+      // Sessions with paiName set are ours — add them to the registry if missing.
+      // Single AppleScript call returns "UUID\tpaiName\n" for each session.
+      const scanScript = `tell application "iTerm2"
+  set output to ""
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        set sid to id of aSession
+        try
+          set pName to (variable named "user.paiName") of aSession
+          if pName is not "" and pName is not missing value then
+            set output to output & sid & (ASCII character 9) & pName & linefeed
+          end if
+        end try
+      end repeat
+    end repeat
+  end repeat
+  return output
+end tell`;
+      const scanResult = runAppleScript(scanScript);
+      if (scanResult) {
+        const knownItermIds = new Set(
+          [...sessionRegistry.values()]
+            .map((e) => e.itermSessionId)
+            .filter(Boolean)
+        );
+        for (const line of scanResult.split("\n").filter(Boolean)) {
+          const parts = line.split("\t");
+          if (parts.length < 2) continue;
+          const itermId = parts[0];
+          const paiName = parts[1];
+          if (knownItermIds.has(itermId)) continue;
+          // Create a synthetic session ID for registry keying
+          const syntheticId = `discovered-${itermId}`;
+          const dedupedName = deduplicateName(paiName, syntheticId);
+          sessionRegistry.set(syntheticId, {
+            sessionId: syntheticId,
+            name: dedupedName,
+            itermSessionId: itermId,
+            registeredAt: Date.now(),
+          });
+          discovered.push(dedupedName);
+          process.stderr.write(`[whazaa-watch] IPC: discover found session ${itermId} ("${dedupedName}")\n`);
+        }
+      }
+
+      sendResponse(socket, { id, ok: true, result: { alive, pruned, discovered } });
+      socket.end();
+      break;
+    }
+
     default: {
       sendResponse(socket, { id, ok: false, error: `Unknown method: ${method}` });
       socket.end();
@@ -2003,19 +2122,18 @@ function getSessionList(): Array<{ id: string; name: string; path: string; type:
   const seenIds = new Set(claudeSessions.map((s) => s.id));
 
   // Merge registered MCP sessions that weren't found by tab-name scan
-  // (e.g. because the iTerm2 tab was renamed and no longer contains "Claude")
+  // (e.g. because the iTerm2 tab was renamed and no longer contains "Claude").
+  // Trust the registry — avoid extra synchronous AppleScript calls here
+  // since they block the event loop and can cause Baileys WebSocket timeouts.
   for (const [, entry] of sessionRegistry) {
     if (entry.itermSessionId && !seenIds.has(entry.itermSessionId)) {
-      if (isItermSessionAlive(entry.itermSessionId)) {
-        const paiName = getItermSessionVar(entry.itermSessionId);
-        claudeSessions.push({
-          id: entry.itermSessionId,
-          name: paiName ?? entry.name,
-          path: "",
-          type: "claude" as const,
-        });
-        seenIds.add(entry.itermSessionId);
-      }
+      claudeSessions.push({
+        id: entry.itermSessionId,
+        name: entry.name,
+        path: "",
+        type: "claude" as const,
+      });
+      seenIds.add(entry.itermSessionId);
     }
   }
 
@@ -2040,12 +2158,108 @@ function getSessionList(): Array<{ id: string; name: string; path: string; type:
 }
 
 /**
+ * Fallback for /ss when the screen is locked: capture the iTerm2 session's
+ * terminal buffer text via AppleScript and send it as a text message.
+ * The iTerm2 process is still running even when the display is locked,
+ * so inter-process AppleScript calls still work.
+ */
+async function handleTextScreenshot(): Promise<void> {
+  try {
+    // Resolve the target iTerm2 session UUID (same priority chain as handleScreenshot)
+    const stripItermPrefix = (id: string | undefined): string | undefined => {
+      if (!id) return id;
+      const colonIdx = id.lastIndexOf(":");
+      return colonIdx >= 0 ? id.slice(colonIdx + 1) : id;
+    };
+
+    const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
+    let itermSessionId = stripItermPrefix(
+      (activeItermSessionId || undefined) ?? activeEntry?.itermSessionId
+    );
+
+    if (!itermSessionId) {
+      const registryEntries = [...sessionRegistry.values()]
+        .sort((a, b) => b.registeredAt - a.registeredAt);
+      const newest = registryEntries.find((e) => e.itermSessionId);
+      if (newest?.itermSessionId) {
+        itermSessionId = stripItermPrefix(newest.itermSessionId);
+      }
+    }
+
+    if (!itermSessionId) {
+      await watcherSendMessage(
+        "Screen is locked and no iTerm2 session found — cannot capture."
+      ).catch(() => {});
+      return;
+    }
+
+    // Get the terminal buffer contents via AppleScript
+    const script = `tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if id of s is "${itermSessionId}" then
+          return contents of s
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`;
+
+    const contents = runAppleScript(script);
+    if (!contents || contents.trim() === "") {
+      await watcherSendMessage(
+        "Screen is locked — could not read terminal buffer (empty)."
+      ).catch(() => {});
+      return;
+    }
+
+    // Trim to last ~4000 chars to stay within WhatsApp message limits
+    const maxLen = 4000;
+    const trimmed =
+      contents.length > maxLen
+        ? "...\n" + contents.slice(-maxLen)
+        : contents;
+
+    await watcherSendMessage(
+      `*Terminal capture (screen locked):*\n\n\`\`\`\n${trimmed}\n\`\`\``
+    ).catch(() => {});
+
+    process.stderr.write("[whazaa-watch] /ss: text capture sent (screen locked fallback)\n");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[whazaa-watch] /ss: text capture error — ${msg}\n`);
+    await watcherSendMessage(
+      `Screen is locked — text capture also failed: ${msg}`
+    ).catch(() => {});
+  }
+}
+
+/**
  * Handle a /ss or /screenshot command received via WhatsApp.
  * Captures the frontmost iTerm2 window and sends it back as an image.
  */
 async function handleScreenshot(): Promise<void> {
   // Ack immediately so the user knows we're working on it
   await watcherSendMessage("Capturing screenshot...").catch(() => {});
+
+  // Check if the screen is locked — screencapture silently fails when locked.
+  try {
+    const lockCheck = spawnSync(
+      "sh",
+      ["-c", "ioreg -n Root -d1 -a | grep -c CGSSessionScreenIsLocked"],
+      { timeout: 5_000, encoding: "utf8" }
+    );
+    const lockCount = parseInt((lockCheck.stdout ?? "0").trim(), 10);
+    if (lockCount > 0) {
+      process.stderr.write("[whazaa-watch] /ss: screen is locked — falling back to terminal text capture\n");
+      await handleTextScreenshot();
+      return;
+    }
+  } catch {
+    // If the check itself fails, proceed and let screencapture surface any error.
+  }
 
   const filePath = join(tmpdir(), `whazaa-screenshot-${Date.now()}.png`);
 
@@ -2768,7 +2982,10 @@ async function connectWatcher(
         }
 
         if (!stopped) {
-          process.stderr.write("[whazaa-watch] Connection closed. Will reconnect...\n");
+          const errMsg = lastDisconnect?.error?.message ?? "unknown";
+          process.stderr.write(
+            `[whazaa-watch] Connection closed (code=${statusCode ?? "?"}, reason=${errMsg}). Will reconnect...\n`
+          );
           scheduleReconnect();
         }
       }
@@ -3062,6 +3279,10 @@ export async function watch(rawSessionId?: string): Promise<void> {
         }
       }
 
+      // Cache the session list so /N uses the exact same ordering
+      cachedSessionList = allSessions;
+      cachedSessionListTime = Date.now();
+
       // Build display list: prefer user.paiName session variable, then registry,
       // then cwd basename, then iTerm2 session name.
       const lines = allSessions.map((s, i) => {
@@ -3094,7 +3315,13 @@ export async function watch(rawSessionId?: string): Promise<void> {
     if (sessionSwitchMatch) {
       const num = parseInt(sessionSwitchMatch[1], 10);
       const newName = sessionSwitchMatch[2]?.trim() || null;
-      const sessions = getSessionList();
+      // Use the cached list from the last /s call (valid for 60s) so the
+      // session numbers match what was displayed. Fall back to a fresh call.
+      const CACHE_TTL_MS = 60_000;
+      const sessions =
+        cachedSessionList && (Date.now() - cachedSessionListTime < CACHE_TTL_MS)
+          ? cachedSessionList
+          : getSessionList();
       if (sessions.length === 0) {
         watcherSendMessage("No sessions found.").catch(() => {});
         return;

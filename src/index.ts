@@ -25,7 +25,7 @@
  * wizard. In setup mode stdout is the terminal — console.log is safe.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -41,7 +41,7 @@ import {
 } from "./whatsapp.js";
 import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
 import { watch } from "./watch.js";
-import { WatcherClient, ChatsResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult } from "./ipc-client.js";
+import { WatcherClient, ChatsResult, DiscoverResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult } from "./ipc-client.js";
 import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
@@ -149,9 +149,10 @@ async function setup(): Promise<void> {
   // ------------------------------------------------------------------
   // Step 2: Check whether already paired
   // ------------------------------------------------------------------
+  const forceRepair = process.argv.includes("--force") || process.argv.includes("-f");
   const authDir = resolveAuthDir();
   const alreadyPaired =
-    existsSync(authDir) && readdirSync(authDir).some((f) => f === "creds.json");
+    !forceRepair && existsSync(authDir) && readdirSync(authDir).some((f) => f === "creds.json");
 
   if (alreadyPaired) {
     console.log("\nExisting session found — verifying connection...");
@@ -190,6 +191,10 @@ async function setup(): Promise<void> {
   // ------------------------------------------------------------------
   // Step 3: First-time pairing — show QR code
   // ------------------------------------------------------------------
+  if (forceRepair && existsSync(authDir)) {
+    rmSync(authDir, { recursive: true, force: true });
+    console.log("Cleared old credentials (--force).\n");
+  }
   console.log("Scan the QR code in your browser with WhatsApp:");
   console.log("  Settings -> Linked Devices -> Link a Device\n");
 
@@ -969,6 +974,177 @@ server.tool(
       }
       return {
         content: [{ type: "text", text: `Session renamed to "${result.name}"` }],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_restart
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_restart",
+  [
+    "Safely restart the Whazaa watcher service managed by launchd (com.whazaa.watcher).",
+    "Use this when the watcher is misbehaving, stuck, or when multiple watcher instances",
+    "are fighting over the WhatsApp session (error code 440 connectionReplaced).",
+    "This tool first kills any rogue manual watcher processes (node processes running",
+    "dist/index.js watch that are not managed by launchd), then uses",
+    "'launchctl kickstart -k' to atomically stop and restart the managed service.",
+    "Returns the new PID if the restart succeeded, or an error message if it failed.",
+  ].join(" "),
+  {},
+  async () => {
+    try {
+      const lines: string[] = [];
+
+      // Step 1: Get the UID for the launchctl target domain
+      const uid = process.getuid ? process.getuid() : parseInt(
+        execSync("id -u", { encoding: "utf-8" }).trim(),
+        10
+      );
+
+      // Step 2: Kill rogue manual watcher processes — node processes running
+      // "dist/index.js watch" or "whazaa watch" that are NOT the launchd-managed one.
+      // We identify the launchd PID first so we can exclude it.
+      let launchdPid: number | null = null;
+      try {
+        const listOut = execSync(`launchctl list com.whazaa.watcher 2>/dev/null`, {
+          encoding: "utf-8",
+        });
+        const pidMatch = listOut.match(/"PID"\s*=\s*(\d+)/);
+        if (pidMatch) {
+          launchdPid = parseInt(pidMatch[1], 10);
+        }
+      } catch {
+        // Service may not be running yet — that's fine
+      }
+
+      // Find all node processes whose command line contains "watch" and looks like whazaa
+      let psOut = "";
+      try {
+        psOut = execSync(
+          `ps -eo pid,args | grep -E "(whazaa|dist/index\\.js).*watch" | grep -v grep`,
+          { encoding: "utf-8" }
+        );
+      } catch {
+        // grep returns exit code 1 when no matches — not an error
+      }
+
+      const roguePids: number[] = [];
+      for (const line of psOut.trim().split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const pid = parseInt(trimmed.split(/\s+/)[0], 10);
+        if (isNaN(pid)) continue;
+        if (launchdPid !== null && pid === launchdPid) continue; // skip the launchd-managed one
+        roguePids.push(pid);
+      }
+
+      if (roguePids.length > 0) {
+        lines.push(`Killing ${roguePids.length} rogue watcher process(es): ${roguePids.join(", ")}`);
+        for (const pid of roguePids) {
+          try {
+            execSync(`kill -TERM ${pid} 2>/dev/null || true`);
+          } catch {
+            // Ignore — process may have already exited
+          }
+        }
+        // Brief pause to let them die before kickstart
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } else {
+        lines.push("No rogue watcher processes found.");
+      }
+
+      // Step 3: Atomically kill + restart the launchd service
+      try {
+        execSync(`launchctl kickstart -k gui/${uid}/com.whazaa.watcher`, {
+          encoding: "utf-8",
+        });
+        lines.push("launchctl kickstart -k succeeded.");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lines.push(`launchctl kickstart failed: ${msg}`);
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          isError: true,
+        };
+      }
+
+      // Step 4: Wait briefly and verify the new PID
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+
+      let newPid: number | null = null;
+      try {
+        const listAfter = execSync(`launchctl list com.whazaa.watcher 2>/dev/null`, {
+          encoding: "utf-8",
+        });
+        const pidMatch = listAfter.match(/"PID"\s*=\s*(\d+)/);
+        if (pidMatch) {
+          newPid = parseInt(pidMatch[1], 10);
+        }
+      } catch {
+        // Ignore
+      }
+
+      if (newPid !== null) {
+        lines.push(`Watcher restarted successfully. New PID: ${newPid}`);
+      } else {
+        lines.push("Watcher restart issued but new PID not yet available — it may still be starting up.");
+      }
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: whatsapp_discover
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "whatsapp_discover",
+  [
+    "Re-scan iTerm2 sessions and update the session registry.",
+    "Prunes dead sessions (closed tabs), and discovers new sessions by scanning",
+    "all iTerm2 tabs for the user.paiName session variable (set by /name or /N).",
+    "Discovered sessions are added to the registry so they appear in /s listings.",
+    "Use when sessions are stuck, showing ghost entries, or after a watcher restart.",
+  ].join(" "),
+  {},
+  async () => {
+    try {
+      const result: DiscoverResult = await watcher.discover();
+      const lines: string[] = [];
+      if (result.alive.length > 0) {
+        lines.push(`Alive (${result.alive.length}): ${result.alive.join(", ")}`);
+      }
+      if (result.discovered.length > 0) {
+        lines.push(`Discovered (${result.discovered.length}): ${result.discovered.join(", ")}`);
+      }
+      if (result.pruned.length > 0) {
+        lines.push(`Pruned (${result.pruned.length}): ${result.pruned.join(", ")}`);
+      }
+      if (result.alive.length === 0 && result.discovered.length === 0 && result.pruned.length === 0) {
+        lines.push("No sessions found.");
+      }
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
