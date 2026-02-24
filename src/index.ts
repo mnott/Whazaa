@@ -1,263 +1,63 @@
 #!/usr/bin/env node
 /**
- * index.ts — Whazaa MCP server entry point
+ * @module index
  *
- * Exposes tools over the Model Context Protocol (stdio transport):
+ * Whazaa MCP server — entry point and tool registrations.
  *
- *   whatsapp_status   — Report connection state and phone number
- *   whatsapp_send     — Send a message to your own WhatsApp number (with optional TTS voice)
- *   whatsapp_tts      — Convert text to speech and send as a WhatsApp voice note
- *   whatsapp_receive  — Drain queued incoming messages from your phone
- *   whatsapp_wait     — Long-poll for the next incoming message
- *   whatsapp_login    — Trigger a new QR pairing flow
- *   whatsapp_rename   — Rename this Claude session (tab title + registry)
+ * This file is the executable that Claude Code (or any MCP host) launches to
+ * use Whazaa. It serves three distinct roles depending on the command-line
+ * argument supplied:
  *
- * Architecture: The MCP server is a thin IPC proxy. All WhatsApp operations
- * are forwarded to the watcher daemon (watch.ts) over a Unix Domain Socket
- * at /tmp/whazaa-watcher.sock. The watcher is the sole owner of the Baileys
- * connection. If the watcher is not running, tools return a clear error.
+ *   - **MCP server mode** (default, no argument): Registers all WhatsApp tools
+ *     over the stdio JSON-RPC transport and begins forwarding calls to the
+ *     watcher daemon via IPC.
+ *   - **Setup mode** (`setup`): Runs the interactive setup wizard from
+ *     `setup.ts` (writes MCP config, installs the /name skill, pairs WhatsApp).
+ *   - **Uninstall mode** (`uninstall`): Removes Whazaa config and credentials.
+ *   - **Watcher mode** (`watch [sessionId]`): Starts the long-running watcher
+ *     daemon that owns the Baileys WebSocket connection.
  *
- * CRITICAL: stdout is the MCP JSON-RPC transport.
- *   - NEVER write non-JSON to stdout.
- *   - All debug output, QR codes, and logs go to stderr.
+ * ### Architecture: thin IPC proxy
+ * The MCP server itself holds no WhatsApp state. Every tool call is forwarded
+ * via a Unix Domain Socket (`/tmp/whazaa-watcher.sock`) to the watcher
+ * daemon (`watch.ts`). The watcher is the sole owner of the Baileys connection
+ * and fan-out message queues. This design means multiple Claude Code tabs can
+ * share a single WhatsApp session without conflict.
  *
- * SETUP MODE: When invoked with "setup" argument, runs an interactive setup
- * wizard. In setup mode stdout is the terminal — console.log is safe.
+ * ### Tools registered
+ * | Tool name              | Purpose                                                  |
+ * |------------------------|----------------------------------------------------------|
+ * | `whatsapp_status`      | Report connection state and logged-in phone number       |
+ * | `whatsapp_send`        | Send a text or TTS voice note to self or any contact     |
+ * | `whatsapp_tts`         | Convert text to a Kokoro voice note and send it          |
+ * | `whatsapp_send_file`   | Send a file (PDF, image, video, etc.) via WhatsApp       |
+ * | `whatsapp_receive`     | Drain the queued incoming messages for this session      |
+ * | `whatsapp_contacts`    | List recently seen contacts, with optional search        |
+ * | `whatsapp_chats`       | List chat conversations (Desktop DB or Baileys fallback) |
+ * | `whatsapp_wait`        | Long-poll for the next incoming message                  |
+ * | `whatsapp_login`       | Trigger a new QR pairing flow                            |
+ * | `whatsapp_history`     | Fetch message history for a chat                         |
+ * | `whatsapp_voice_config`| Get or set TTS voice mode configuration                  |
+ * | `whatsapp_speak`       | Speak text aloud through the Mac's local speakers        |
+ * | `whatsapp_rename`      | Rename this Claude session (tab title + registry)        |
+ * | `whatsapp_restart`     | Restart the launchd-managed watcher service              |
+ * | `whatsapp_discover`    | Re-scan iTerm2 sessions and refresh the session registry |
+ *
+ * ### stdout constraint
+ * In MCP server mode, **stdout is the JSON-RPC transport**. Never write
+ * anything other than well-formed MCP JSON to stdout. All debug output,
+ * QR codes, and log lines must go to stderr.
  */
 
-import { spawn, execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import {
-  initialize,
-  triggerLogin,
-  waitForConnection,
-  waitForLogout,
-  waitForQR,
-} from "./whatsapp.js";
-import { resolveAuthDir, enableSetupMode, cleanupQR, suppressQRDisplay, unsuppressQRDisplay } from "./auth.js";
-import { watch } from "./watch.js";
+import { watch } from "./watcher/index.js";
+import { setup, uninstall } from "./setup.js";
 import { WatcherClient, ChatsResult, DiscoverResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult } from "./ipc-client.js";
 import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
-
-// ---------------------------------------------------------------------------
-// Setup wizard
-// ---------------------------------------------------------------------------
-
-/**
- * Open a URL in the user's default browser, platform-agnostic.
- */
-function openBrowser(url: string): void {
-  const cmd =
-    process.platform === "darwin"
-      ? "open"
-      : process.platform === "win32"
-      ? "start"
-      : "xdg-open";
-  spawn(cmd, [url], { detached: true, stdio: "ignore" }).unref();
-}
-
-async function setup(): Promise<void> {
-  enableSetupMode();
-
-  const repoUrl = "https://github.com/mnott/Whazaa";
-  console.log(`Opening Whazaa on GitHub: ${repoUrl}`);
-  openBrowser(repoUrl);
-
-  console.log("\nWhazaa Setup\n");
-
-  // ------------------------------------------------------------------
-  // Step 1: Configure ~/.claude/.mcp.json
-  // ------------------------------------------------------------------
-  const mcpPath = join(homedir(), ".claude", ".mcp.json");
-
-  interface McpConfig {
-    mcpServers?: Record<string, { command: string; args: string[] }>;
-  }
-
-  let config: McpConfig = {};
-
-  if (existsSync(mcpPath)) {
-    try {
-      config = JSON.parse(readFileSync(mcpPath, "utf-8")) as McpConfig;
-    } catch {
-      console.log("Warning: ~/.claude/.mcp.json exists but could not be parsed. Overwriting.");
-      config = {};
-    }
-
-    if (config.mcpServers?.whazaa) {
-      console.log("Already configured in ~/.claude/.mcp.json");
-    } else {
-      config.mcpServers = config.mcpServers ?? {};
-      config.mcpServers.whazaa = { command: "npx", args: ["-y", "whazaa"] };
-      writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-      console.log("Added Whazaa to ~/.claude/.mcp.json");
-    }
-  } else {
-    mkdirSync(dirname(mcpPath), { recursive: true });
-    config = {
-      mcpServers: {
-        whazaa: { command: "npx", args: ["-y", "whazaa"] },
-      },
-    };
-    writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-    console.log("Created ~/.claude/.mcp.json with Whazaa");
-  }
-
-  // ------------------------------------------------------------------
-  // Step 1b: Install /name skill for session renaming
-  // ------------------------------------------------------------------
-  const skillDir = join(homedir(), ".claude", "skills", "Name");
-  const skillPath = join(skillDir, "SKILL.md");
-  if (existsSync(skillPath)) {
-    console.log("Skill /name already installed");
-  } else {
-    mkdirSync(skillDir, { recursive: true });
-    const skillContent = [
-      "---",
-      "name: name",
-      'description: Rename the current Claude session (tab title + registry). USE WHEN user says "/name", "name this session", "rename session", OR wants to label what they\'re working on.',
-      "user_invocable: true",
-      "---",
-      "",
-      "# Name — Session Renaming",
-      "",
-      "Rename the current session using the Whazaa `whatsapp_rename` MCP tool.",
-      "",
-      "## Usage",
-      "",
-      "```",
-      "/name <new name>",
-      "```",
-      "",
-      "## Instructions",
-      "",
-      "When this skill is invoked with arguments, immediately call `whatsapp_rename` with the argument as the name. No confirmation needed. Report the result.",
-      "",
-      "If no argument is provided, ask what name to use.",
-      "",
-    ].join("\n");
-    writeFileSync(skillPath, skillContent);
-    console.log("Installed /name skill for session renaming");
-  }
-
-  // ------------------------------------------------------------------
-  // Step 2: Check whether already paired
-  // ------------------------------------------------------------------
-  const forceRepair = process.argv.includes("--force") || process.argv.includes("-f");
-  const authDir = resolveAuthDir();
-  const alreadyPaired =
-    !forceRepair && existsSync(authDir) && readdirSync(authDir).some((f) => f === "creds.json");
-
-  if (alreadyPaired) {
-    console.log("\nExisting session found — verifying connection...");
-    suppressQRDisplay();
-    initialize().catch(() => {});
-
-    const VERIFY_TIMEOUT_MS = 10_000;
-    const result = await Promise.race([
-      waitForConnection().then((phone) => ({ outcome: "connected" as const, phone })),
-      waitForLogout().then(() => ({ outcome: "logout" as const, phone: null })),
-      waitForQR().then(() => ({ outcome: "qr" as const, phone: null })),
-      new Promise<{ outcome: "timeout"; phone: null }>((resolve) =>
-        setTimeout(() => resolve({ outcome: "timeout", phone: null }), VERIFY_TIMEOUT_MS)
-      ),
-    ]);
-
-    unsuppressQRDisplay();
-
-    if (result.outcome === "connected") {
-      console.log(`\nAlready connected! Your WhatsApp session is active as +${result.phone}.`);
-      console.log("\nSetup complete! Restart Claude Code if Whazaa is not yet available.");
-      process.exit(0);
-    }
-
-    if (result.outcome === "logout" || result.outcome === "qr") {
-      console.log("\nSession expired or revoked. Clearing old credentials and re-pairing...\n");
-    } else {
-      console.log("\nCould not verify connection (another Whazaa instance may already be running).");
-      console.log("Assuming session is active. If Whazaa tools are not working, run `npx whazaa setup` again.");
-      process.exit(0);
-    }
-
-    rmSync(authDir, { recursive: true, force: true });
-  }
-
-  // ------------------------------------------------------------------
-  // Step 3: First-time pairing — show QR code
-  // ------------------------------------------------------------------
-  if (forceRepair && existsSync(authDir)) {
-    rmSync(authDir, { recursive: true, force: true });
-    console.log("Cleared old credentials (--force).\n");
-  }
-  console.log("Scan the QR code in your browser with WhatsApp:");
-  console.log("  Settings -> Linked Devices -> Link a Device\n");
-
-  triggerLogin().catch(() => {});
-
-  const phoneNumber = await waitForConnection();
-  cleanupQR();
-
-  // ------------------------------------------------------------------
-  // Step 4: Success
-  // ------------------------------------------------------------------
-  console.log(`\nConnected to WhatsApp as +${phoneNumber}`);
-  console.log("Finishing sync with WhatsApp...");
-
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
-
-  console.log("\nSetup complete! Restart Claude Code and Whazaa will be ready.");
-  process.exit(0);
-}
-
-// ---------------------------------------------------------------------------
-// Uninstall
-// ---------------------------------------------------------------------------
-
-async function uninstall(): Promise<void> {
-  console.log("Whazaa Uninstall\n");
-
-  const mcpPath = join(homedir(), ".claude", ".mcp.json");
-  if (existsSync(mcpPath)) {
-    try {
-      const config = JSON.parse(readFileSync(mcpPath, "utf-8"));
-      if (config.mcpServers?.whazaa) {
-        delete config.mcpServers.whazaa;
-        writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-        console.log("Removed Whazaa from ~/.claude/.mcp.json");
-      } else {
-        console.log("Whazaa not found in ~/.claude/.mcp.json");
-      }
-    } catch {
-      console.log("Warning: could not parse ~/.claude/.mcp.json");
-    }
-  }
-
-  const authDir = resolveAuthDir();
-  if (existsSync(authDir)) {
-    rmSync(authDir, { recursive: true, force: true });
-    console.log("Removed auth credentials from " + authDir);
-  }
-
-  const whazaaDir = join(homedir(), ".whazaa");
-  if (existsSync(whazaaDir)) {
-    try {
-      const remaining = readdirSync(whazaaDir);
-      if (remaining.length === 0) {
-        rmSync(whazaaDir, { recursive: true });
-        console.log("Removed ~/.whazaa/");
-      }
-    } catch { /* ignore */ }
-  }
-
-  console.log("\nWhazaa has been uninstalled. Restart Claude Code to apply.");
-  process.exit(0);
-}
 
 // ---------------------------------------------------------------------------
 // MCP server setup
@@ -276,11 +76,12 @@ const watcher = new WatcherClient();
 // Tool: whatsapp_status
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_status",
-  "Check the Whazaa connection state and the WhatsApp phone number it is logged in as.",
-  {},
-  async () => {
+// Reports whether the watcher is connected, awaiting a QR scan, or
+// disconnected. Returns the authenticated phone number when connected.
+server.registerTool("whatsapp_status", {
+  description: "Check the Whazaa connection state and the WhatsApp phone number it is logged in as.",
+  inputSchema: {},
+}, async () => {
     try {
       const s = await watcher.status();
 
@@ -310,9 +111,11 @@ server.tool(
 // Tool: whatsapp_send
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_send",
-  [
+// Sends a WhatsApp text message (or TTS voice note when `voice` is set).
+// Recipient defaults to self-chat when omitted. Supports basic Markdown and
+// accepts phone numbers, JIDs, or contact names as the recipient identifier.
+server.registerTool("whatsapp_send", {
+  description: [
     "Send a WhatsApp message.",
     "Without a recipient, sends to your own self-chat (same as before).",
     "With a recipient, sends to any contact or group.",
@@ -323,7 +126,7 @@ server.tool(
     "Use voice='true' or voice='default' for the default voice,",
     "or a specific voice name like 'af_heart', 'bm_george', 'af_bella', etc.",
   ].join(" "),
-  {
+  inputSchema: {
     message: z
       .string()
       .min(1)
@@ -341,7 +144,7 @@ server.tool(
         "Optional: if set, send message as a TTS voice note using Kokoro. Use 'true' or 'default' for the configured default voice, or a specific voice name like 'bm_george', 'af_bella', 'af_nova'."
       ),
   },
-  async ({ message, recipient, voice }) => {
+}, async ({ message, recipient, voice }) => {
     try {
       // If voice is requested, delegate to TTS IPC method
       if (voice !== undefined && voice !== "") {
@@ -382,9 +185,12 @@ server.tool(
 // Tool: whatsapp_tts
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_tts",
-  [
+// Dedicated TTS tool: converts text to a Kokoro voice note and sends it via
+// WhatsApp. Runs entirely locally (no cloud API). The ~160 MB Kokoro model is
+// downloaded on first use and cached. Voice defaults to the configured default
+// when omitted.
+server.registerTool("whatsapp_tts", {
+  description: [
     "Convert text to speech and send as a WhatsApp voice note.",
     "Uses Kokoro TTS — 100% local, no internet required after first run.",
     "The model (~160 MB) is downloaded on first use and cached locally.",
@@ -392,7 +198,7 @@ server.tool(
     "Without a recipient, sends to your own self-chat.",
     "With a recipient, sends to any contact or group.",
   ].join(" "),
-  {
+  inputSchema: {
     message: z
       .string()
       .min(1)
@@ -410,7 +216,7 @@ server.tool(
         "Optional recipient: phone number (e.g. '+41764502698'), WhatsApp JID, or contact name. Omit to send to self-chat."
       ),
   },
-  async ({ message, voice, recipient }) => {
+}, async ({ message, voice, recipient }) => {
     try {
       const result: TtsResult = await watcher.tts({
         text: message,
@@ -440,15 +246,17 @@ server.tool(
 // Tool: whatsapp_send_file
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_send_file",
-  "Send a file (document, image, video, audio) via WhatsApp. Supports any file type — PDFs, Word docs, images, videos, etc.",
-  {
+// Sends an arbitrary file (PDF, image, video, audio, document, etc.) as a
+// WhatsApp attachment. The file is read from an absolute path on disk and
+// forwarded to the watcher, which handles MIME detection and Baileys upload.
+server.registerTool("whatsapp_send_file", {
+  description: "Send a file (document, image, video, audio) via WhatsApp. Supports any file type — PDFs, Word docs, images, videos, etc.",
+  inputSchema: {
     filePath: z.string().min(1).describe("Absolute path to the file to send"),
     recipient: z.string().optional().describe("Optional recipient: phone number, JID, or contact name. Omit to send to self-chat."),
     caption: z.string().optional().describe("Optional caption/message to accompany the file"),
   },
-  async ({ filePath, recipient, caption }) => {
+}, async ({ filePath, recipient, caption }) => {
     try {
       const result = await watcher.sendFile(filePath, recipient, caption);
       return {
@@ -468,16 +276,19 @@ server.tool(
 // Tool: whatsapp_receive
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_receive",
-  [
+// Drains the in-memory message queue for this MCP session and returns the
+// accumulated messages since the last call, then clears the queue. Scope
+// can be restricted to self-chat (default), a specific contact/JID, or all
+// chats simultaneously via the `from` parameter.
+server.registerTool("whatsapp_receive", {
+  description: [
     "Return queued incoming WhatsApp messages since the last call, then clear the queue.",
     "Without 'from': returns self-chat messages (default, backwards compatible).",
     "With 'from' set to a phone number, JID, or contact name: returns messages from that contact.",
     "With 'from' set to 'all': returns messages from all chats (self-chat + all contacts), prefixed with sender JID.",
     "Returns 'No new messages.' if the queue is empty.",
   ].join(" "),
-  {
+  inputSchema: {
     from: z
       .string()
       .optional()
@@ -485,7 +296,7 @@ server.tool(
         "Optional sender filter: phone number, JID, contact name, or 'all'. Omit for self-chat only."
       ),
   },
-  async ({ from }) => {
+}, async ({ from }) => {
     try {
       const result = await watcher.receive(from);
       const { messages } = result;
@@ -516,15 +327,18 @@ server.tool(
 // Tool: whatsapp_contacts
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_contacts",
-  [
+// Returns the list of contacts that have exchanged messages in this Baileys
+// session, ordered by most-recently-seen. Supports optional substring search
+// across name and phone number. Returns JIDs suitable for use with
+// whatsapp_send and whatsapp_receive.
+server.registerTool("whatsapp_contacts", {
+  description: [
     "List recently seen WhatsApp contacts.",
     "Returns contacts that have sent or received messages in this session, most recent first.",
     "Optionally filter by name or phone number using the 'search' parameter.",
     "Use the returned phone number or JID as the 'recipient' parameter for whatsapp_send.",
   ].join(" "),
-  {
+  inputSchema: {
     search: z
       .string()
       .optional()
@@ -536,7 +350,7 @@ server.tool(
       .default(50)
       .describe("Maximum number of contacts to return (default 50)"),
   },
-  async ({ search, limit }) => {
+}, async ({ search, limit }) => {
     try {
       const result = await watcher.contacts(search, limit);
       const { contacts } = result;
@@ -576,9 +390,13 @@ server.tool(
 // Tool: whatsapp_chats
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_chats",
-  [
+// Lists WhatsApp chat conversations (inbox). Prefers the WhatsApp Desktop
+// macOS SQLite database for a complete, always-up-to-date view that works
+// even when the phone is offline. Falls back to the Baileys in-memory store
+// (typically ~100-150 chats synced at connect time) when the Desktop DB is
+// not available.
+server.registerTool("whatsapp_chats", {
+  description: [
     "List WhatsApp chat conversations (inbox).",
     "Reads directly from the WhatsApp Desktop macOS SQLite database when available (complete inbox, no Baileys sync required).",
     "Falls back to the Baileys in-memory store when the Desktop DB is not present (~100-150 chats synced on connect).",
@@ -586,7 +404,7 @@ server.tool(
     "or with whatsapp_receive to read messages from a specific contact.",
     "Optionally filter by name or phone number using the 'search' parameter.",
   ].join(" "),
-  {
+  inputSchema: {
     search: z
       .string()
       .optional()
@@ -598,7 +416,7 @@ server.tool(
       .default(50)
       .describe("Maximum number of chats to return (default 50)"),
   },
-  async ({ search, limit }) => {
+}, async ({ search, limit }) => {
     try {
       // Try the Desktop DB first — it has the full inbox without needing Baileys sync
       const desktopChats = listChats(search, limit);
@@ -670,15 +488,18 @@ server.tool(
 // Tool: whatsapp_wait
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_wait",
-  [
+// Long-polls the watcher for the next incoming message. Blocks (server-side)
+// until a message arrives or the configurable timeout elapses. Preferred over
+// a polling loop with whatsapp_receive — one blocking call instead of many
+// round-trips.
+server.registerTool("whatsapp_wait", {
+  description: [
     "Wait for the next incoming WhatsApp message.",
     "Blocks until a message arrives or the timeout is reached (default 120 seconds).",
     "Use this instead of polling whatsapp_receive in a loop.",
     "Run this in the background so you can continue working while waiting.",
   ].join(" "),
-  {
+  inputSchema: {
     timeout: z
       .number()
       .min(1)
@@ -686,7 +507,7 @@ server.tool(
       .default(120)
       .describe("Max seconds to wait for a message (default 120)"),
   },
-  async ({ timeout }) => {
+}, async ({ timeout }) => {
     try {
       const result = await watcher.wait(timeout * 1_000);
       const { messages } = result;
@@ -717,16 +538,19 @@ server.tool(
 // Tool: whatsapp_login
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_login",
-  [
+// Instructs the watcher to start a fresh QR-code pairing flow. Useful when
+// the WhatsApp session has expired, been revoked, or when the user wants to
+// link a different phone number. The QR code is printed to the watcher's
+// stderr — the user must check the terminal where the watcher runs.
+server.registerTool("whatsapp_login", {
+  description: [
     "Trigger a new WhatsApp QR pairing flow.",
     "Use this when the connection is lost and automatic reconnection fails,",
     "or when you need to link a different phone number.",
     "A QR code will be printed to the watcher's stderr — check the terminal where it is running.",
   ].join(" "),
-  {},
-  async () => {
+  inputSchema: {},
+}, async () => {
     try {
       const result = await watcher.login();
       return {
@@ -746,15 +570,18 @@ server.tool(
 // Tool: whatsapp_history
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_history",
-  [
+// Fetches historical messages for a specific chat. Tries the WhatsApp Desktop
+// macOS SQLite database first (offline-capable, no anchor message needed).
+// Falls back to an on-demand Baileys fetch from the phone when the Desktop DB
+// is unavailable. Accepts both full JIDs and bare phone numbers.
+server.registerTool("whatsapp_history", {
+  description: [
     "Fetch message history for a WhatsApp chat.",
     "Reads directly from the WhatsApp Desktop macOS SQLite database when available — no phone connection required.",
     "Falls back to Baileys on-demand fetch (requires phone online) when the Desktop DB is not present.",
     "Accepts a full JID (e.g. '41796074745@s.whatsapp.net') or a phone number (e.g. '+41796074745').",
   ].join(" "),
-  {
+  inputSchema: {
     jid: z
       .string()
       .min(1)
@@ -768,7 +595,7 @@ server.tool(
       .default(50)
       .describe("Number of messages to fetch (default 50, max 500)"),
   },
-  async ({ jid, count }) => {
+}, async ({ jid, count }) => {
     try {
       // Try the Desktop DB first — works offline, no anchor message needed
       const desktopMessages = getMessages(jid, count);
@@ -831,16 +658,19 @@ server.tool(
 // Tool: whatsapp_voice_config
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_voice_config",
-  [
+// Gets or sets the persistent TTS voice configuration stored in the watcher.
+// Covers: voice mode (text vs. voice notes), local speaker mode, the default
+// Kokoro voice, and persona-to-voice mappings. Use action='get' to read the
+// current config and action='set' to update one or more fields atomically.
+server.registerTool("whatsapp_voice_config", {
+  description: [
     "Get or set voice mode configuration.",
     "Actions: 'get' (read current config), 'set' (update config).",
     "Voice mode controls whether PAI responds via voice notes or text.",
     "Default voice is 'bm_fable'.",
     "Personas map names to voices (e.g. 'Nicole' -> 'af_nicole').",
   ].join(" "),
-  {
+  inputSchema: {
     action: z
       .enum(["get", "set"])
       .describe("Action: 'get' to read config, 'set' to update it"),
@@ -861,7 +691,7 @@ server.tool(
       .optional()
       .describe("Map of persona names to voice IDs (e.g. {\"Nicole\": \"af_nicole\"})"),
   },
-  async ({ action, defaultVoice, voiceMode, localMode, personas }) => {
+}, async ({ action, defaultVoice, voiceMode, localMode, personas }) => {
     try {
       const updates: Record<string, unknown> = {};
       if (defaultVoice !== undefined) updates.defaultVoice = defaultVoice;
@@ -908,16 +738,19 @@ server.tool(
 // Tool: whatsapp_speak
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_speak",
-  [
+// Synthesises speech with Kokoro TTS and plays it through the Mac's local
+// speakers (via Core Audio / afplay). Audio plays in the background and does
+// not block subsequent tool calls. Use this for local voice feedback instead
+// of sending a WhatsApp voice note.
+server.registerTool("whatsapp_speak", {
+  description: [
     "Speak text aloud through the Mac's speakers using Kokoro TTS.",
     "100% local, no internet required. Same voices as whatsapp_tts.",
     "Audio plays in the background without blocking other operations.",
     "Use this when the user wants to hear responses locally instead of via WhatsApp voice notes.",
     `Available voices: ${listVoices().join(", ")}.`,
   ].join(" "),
-  {
+  inputSchema: {
     message: z
       .string()
       .min(1)
@@ -928,7 +761,7 @@ server.tool(
       .default("bm_fable")
       .describe("Kokoro voice to use (default: 'bm_fable'). Examples: 'af_bella', 'af_nova', 'bm_george', 'bm_daniel', 'bf_emma'."),
   },
-  async ({ message, voice }) => {
+}, async ({ message, voice }) => {
     try {
       const result: SpeakResult = await watcher.speak(message, voice);
       if (!result.success) {
@@ -954,16 +787,19 @@ server.tool(
 // Tool: whatsapp_rename
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_rename",
-  "Rename this Claude session. Updates the session name in the watcher registry, the iTerm2 tab title, and the persistent session variable. The new name appears in /s listings and the status bar.",
-  {
+// Renames the current Claude session. Writes the new name into the watcher's
+// session registry, updates the iTerm2 tab title via AppleScript, and persists
+// the name in the iTerm2 `user.paiName` session variable so it survives
+// watcher restarts and appears in `/s` session listings.
+server.registerTool("whatsapp_rename", {
+  description: "Rename this Claude session. Updates the session name in the watcher registry, the iTerm2 tab title, and the persistent session variable. The new name appears in /s listings and the status bar.",
+  inputSchema: {
     name: z
       .string()
       .min(1)
       .describe("The new session name (e.g. 'Whazaa Dev', 'API Refactor')"),
   },
-  async ({ name }) => {
+}, async ({ name }) => {
     try {
       const result = await watcher.rename(name);
       if (!result.success) {
@@ -989,9 +825,13 @@ server.tool(
 // Tool: whatsapp_restart
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_restart",
-  [
+// Restarts the launchd-managed Whazaa watcher service
+// (`com.whazaa.watcher`). Before issuing the launchctl kickstart, the tool
+// scans running processes for rogue manual watcher instances (not managed by
+// launchd) and SIGTERMs them to prevent session-conflict errors (code 440
+// connectionReplaced). Returns the new watcher PID on success.
+server.registerTool("whatsapp_restart", {
+  description: [
     "Safely restart the Whazaa watcher service managed by launchd (com.whazaa.watcher).",
     "Use this when the watcher is misbehaving, stuck, or when multiple watcher instances",
     "are fighting over the WhatsApp session (error code 440 connectionReplaced).",
@@ -1000,8 +840,8 @@ server.tool(
     "'launchctl kickstart -k' to atomically stop and restart the managed service.",
     "Returns the new PID if the restart succeeded, or an error message if it failed.",
   ].join(" "),
-  {},
-  async () => {
+  inputSchema: {},
+}, async () => {
     try {
       const lines: string[] = [];
 
@@ -1117,17 +957,20 @@ server.tool(
 // Tool: whatsapp_discover
 // ---------------------------------------------------------------------------
 
-server.tool(
-  "whatsapp_discover",
-  [
+// Re-scans all iTerm2 tabs for the `user.paiName` session variable and
+// refreshes the watcher's session registry. Prunes entries for closed tabs
+// (dead sessions) and registers newly discovered ones. Useful after a watcher
+// restart or when `/s` shows stale or missing sessions.
+server.registerTool("whatsapp_discover", {
+  description: [
     "Re-scan iTerm2 sessions and update the session registry.",
     "Prunes dead sessions (closed tabs), and discovers new sessions by scanning",
     "all iTerm2 tabs for the user.paiName session variable (set by /name or /N).",
     "Discovered sessions are added to the registry so they appear in /s listings.",
     "Use when sessions are stuck, showing ghost entries, or after a watcher restart.",
   ].join(" "),
-  {},
-  async () => {
+  inputSchema: {},
+}, async () => {
     try {
       const result: DiscoverResult = await watcher.discover();
       const lines: string[] = [];
@@ -1160,6 +1003,23 @@ server.tool(
 // Main
 // ---------------------------------------------------------------------------
 
+/**
+ * Entry point for the Whazaa process.
+ *
+ * Dispatches to one of four modes based on `process.argv`:
+ *
+ * - `setup`   — Runs the interactive setup wizard and exits.
+ * - `uninstall` — Removes all Whazaa config/credentials and exits.
+ * - `watch [sessionId]` — Starts the long-running watcher daemon that owns
+ *   the Baileys WebSocket connection. `sessionId` is an optional iTerm2
+ *   session identifier used to route incoming messages to the correct queue.
+ * - *(default)* — Starts the MCP server over stdio. Registers this session
+ *   with the watcher (non-fatal if the watcher is not yet running) and then
+ *   attaches the `StdioServerTransport` so Claude Code can call the tools.
+ *
+ * @returns A promise that resolves when the MCP transport is connected, or
+ *   rejects with a fatal error (written to stderr and `process.exit(1)`).
+ */
 async function main(): Promise<void> {
   if (process.argv.includes("setup")) {
     await setup();
