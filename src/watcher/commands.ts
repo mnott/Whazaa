@@ -512,7 +512,7 @@ end tell`;
         // Paste "go" first without Enter, then send Enter after a second
         // delay — this avoids the race where Enter arrives while Claude is
         // still processing /clear and gets swallowed as a literal newline.
-        await new Promise((r) => setTimeout(r, 8000));
+        await new Promise((r) => setTimeout(r, 4000));
         pasteTextIntoSession(sid, "go");
         await new Promise((r) => setTimeout(r, 500));
         sendKeystrokeToSession(sid, 13);
