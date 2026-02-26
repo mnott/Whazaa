@@ -317,6 +317,62 @@ export function isScreenLocked(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// PTY write fallback — bypasses AppleScript when screen is locked
+// ---------------------------------------------------------------------------
+
+/**
+ * Write text directly to a PTY slave device, as if the user typed it.
+ *
+ * Last-resort fallback for when the macOS screen is locked and AppleScript
+ * cannot interact with iTerm2. Writing to the slave side of a PTY device
+ * (/dev/ttysXXX) injects bytes into the terminal's input buffer — the
+ * foreground process (Claude Code) reads them as if typed at the keyboard.
+ *
+ * A trailing newline is appended to simulate pressing Enter.
+ *
+ * @param ttyPath - Full device path, e.g. "/dev/ttys003".
+ * @param text    - Text to inject (newline appended automatically).
+ * @returns `true` if the write succeeded; `false` otherwise.
+ */
+export function writeToTty(ttyPath: string, text: string): boolean {
+  if (!ttyPath || !ttyPath.startsWith("/dev/ttys")) {
+    log(`writeToTty: invalid tty path "${ttyPath}"`);
+    return false;
+  }
+
+  // Validate the device node exists before writing
+  const statResult = spawnSync("test", ["-c", ttyPath], {
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 1_000,
+  });
+  if (statResult.status !== 0) {
+    log(`writeToTty: device not found: ${ttyPath}`);
+    return false;
+  }
+
+  // Use printf to write text + newline to the PTY device.
+  // Single-quote escaping prevents shell interpretation of special chars.
+  const safeText = text.replace(/'/g, "'\\''");
+  const writeResult = spawnSync(
+    "sh",
+    ["-c", `printf '%s\\n' '${safeText}' > ${ttyPath}`],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 2_000,
+    }
+  );
+
+  if (writeResult.status !== 0) {
+    const stderr = writeResult.stderr?.toString().trim() ?? "";
+    log(`writeToTty: failed for ${ttyPath} — ${stderr || "exit " + writeResult.status}`);
+    return false;
+  }
+
+  log(`writeToTty: delivered ${text.length} chars to ${ttyPath}`);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Batched snapshot — all session data in a single AppleScript call
 // ---------------------------------------------------------------------------
 

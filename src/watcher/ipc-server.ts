@@ -75,6 +75,7 @@ import {
   watcherStatus,
   sentMessageIds,
   managedSessions,
+  updateSessionTtyCache,
 } from "./state.js";
 import {
   resolveJid,
@@ -1030,6 +1031,9 @@ export function discoverSessions(): { alive: string[]; pruned: string[]; discove
   // N×isItermSessionAlive + separate paiName scan AppleScript).
   const snapshot = snapshotAllSessions();
   const liveIds = new Set(snapshot.map((s) => s.id));
+
+  // Prime the TTY cache for the locked-screen PTY write fallback
+  updateSessionTtyCache(snapshot);
 
   // Safety: if snapshot returned 0 sessions but we have registered sessions
   // with iTerm IDs, AppleScript may have failed (screen locked, iTerm not
