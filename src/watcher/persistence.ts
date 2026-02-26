@@ -25,9 +25,11 @@ import {
   chatStore,
   contactStore,
   messageStore,
+  sessionRegistry,
+  clientQueues,
 } from "./state.js";
 import { log } from "./log.js";
-import type { VoiceConfig } from "./types.js";
+import type { RegisteredSession, VoiceConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Path constants
@@ -38,6 +40,7 @@ export const CHAT_CACHE_PATH = join(WHAZAA_DIR, "chat-cache.json");
 export const CONTACT_CACHE_PATH = join(WHAZAA_DIR, "contact-cache.json");
 export const MESSAGE_CACHE_PATH = join(WHAZAA_DIR, "message-cache.json");
 export const VOICE_CONFIG_PATH = join(WHAZAA_DIR, "voice-config.json");
+export const SESSION_REGISTRY_PATH = join(WHAZAA_DIR, "sessions.json");
 
 // ---------------------------------------------------------------------------
 // Voice config defaults and persistence
@@ -206,5 +209,65 @@ export function saveStoreCache(): void {
     writeFileSync(MESSAGE_CACHE_PATH, JSON.stringify(msgObj), "utf-8");
   } catch (err) {
     log(`Failed to save store cache: ${err}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session registry persistence
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist the current session registry to `~/.whazaa/sessions.json`.
+ *
+ * Saves only the fields needed to restore sessions after a watcher restart:
+ * sessionId, name, and itermSessionId. Call after any registry mutation
+ * (register, rename, kill, discover).
+ */
+export function saveSessionRegistry(): void {
+  try {
+    mkdirSync(WHAZAA_DIR, { recursive: true });
+    const entries = Array.from(sessionRegistry.values()).map((s) => ({
+      sessionId: s.sessionId,
+      name: s.name,
+      itermSessionId: s.itermSessionId,
+    }));
+    writeFileSync(SESSION_REGISTRY_PATH, JSON.stringify(entries, null, 2), "utf-8");
+  } catch (err) {
+    log(`Failed to save session registry: ${err}`);
+  }
+}
+
+/**
+ * Restore persisted sessions into the registry from `~/.whazaa/sessions.json`.
+ *
+ * Called once at watcher startup before auto-discover runs. Sessions are loaded
+ * with their original sessionId and name; liveness is verified later by the
+ * auto-discover prune phase.
+ */
+export function loadSessionRegistry(): void {
+  try {
+    if (!existsSync(SESSION_REGISTRY_PATH)) return;
+    const raw = JSON.parse(readFileSync(SESSION_REGISTRY_PATH, "utf-8")) as Array<{
+      sessionId: string;
+      name: string;
+      itermSessionId?: string;
+    }>;
+    for (const entry of raw) {
+      if (!entry.sessionId) continue;
+      sessionRegistry.set(entry.sessionId, {
+        sessionId: entry.sessionId,
+        name: entry.name ?? "Unknown",
+        itermSessionId: entry.itermSessionId,
+        registeredAt: Date.now(),
+      });
+      if (!clientQueues.has(entry.sessionId)) {
+        clientQueues.set(entry.sessionId, []);
+      }
+    }
+    if (raw.length > 0) {
+      log(`Restored ${raw.length} session(s) from disk`);
+    }
+  } catch {
+    // Corrupted file — start fresh
   }
 }

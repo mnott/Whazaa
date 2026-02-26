@@ -86,6 +86,7 @@ import {
   loadVoiceConfig,
   saveVoiceConfig,
   saveStoreCache,
+  saveSessionRegistry,
 } from "./persistence.js";
 import {
   findItermSessionForTermId,
@@ -247,6 +248,7 @@ function handleRegister(
     clientQueues.set(sessionId, []);
   }
   log(`IPC: registered client ${sessionId} (name: "${effectiveName}"${persistedName ? " [restored from iTerm]" : ""}, iTerm: ${itermId ?? "unknown"})`);
+  saveSessionRegistry();
   sendResponse(socket, { id, ok: true, result: { registered: true } });
   socket.end();
 }
@@ -273,6 +275,7 @@ function handleRename(
       setItermTabName(entry.itermSessionId, dedupedName);
     }
     log(`IPC: renamed session ${sessionId} to "${dedupedName}"`);
+    saveSessionRegistry();
     sendResponse(socket, { id, ok: true, result: { success: true, name: dedupedName } });
   } else {
     sendResponse(socket, { id, ok: false, error: "Session not registered" });
@@ -892,8 +895,12 @@ function handleVoiceConfig(
   socket.end();
 }
 
-// Prune dead iTerm2 sessions and rediscover sessions by user.paiName.
-function handleDiscover(socket: Socket, id: string): void {
+/**
+ * Prune dead sessions and scan iTerm2 for sessions with user.paiName.
+ * Returns { alive, pruned, discovered } arrays of session names.
+ * Called by handleDiscover (IPC) and by the watcher startup sequence.
+ */
+export function discoverSessions(): { alive: string[]; pruned: string[]; discovered: string[] } {
   const alive: string[] = [];
   const pruned: string[] = [];
   const discovered: string[] = [];
@@ -910,7 +917,7 @@ function handleDiscover(socket: Socket, id: string): void {
       if (activeClientId === sid) {
         setActiveClientId(null);
       }
-      log(`IPC: discover pruned dead session ${sid} ("${entry.name}")`);
+      log(`discover: pruned dead session ${sid} ("${entry.name}")`);
     }
   }
 
@@ -919,13 +926,11 @@ function handleDiscover(socket: Socket, id: string): void {
     if (!isItermSessionAlive(msid)) {
       pruned.push(msEntry.name);
       managedSessions.delete(msid);
-      log(`IPC: discover pruned dead managed session ${msid} ("${msEntry.name}")`);
+      log(`discover: pruned dead managed session ${msid} ("${msEntry.name}")`);
     }
   }
 
   // Phase 2: Scan ALL iTerm2 sessions for user.paiName variable.
-  // Sessions with paiName set are ours — add them to the registry if missing.
-  // Single AppleScript call returns "UUID\tpaiName\n" for each session.
   const scanScript = `tell application "iTerm2"
   set output to ""
   repeat with aWindow in windows
@@ -956,7 +961,6 @@ end tell`;
       const itermId = parts[0];
       const paiName = parts[1];
       if (knownItermIds.has(itermId)) continue;
-      // Create a synthetic session ID for registry keying
       const syntheticId = `discovered-${itermId}`;
       const dedupedName = deduplicateName(paiName, syntheticId);
       sessionRegistry.set(syntheticId, {
@@ -966,11 +970,22 @@ end tell`;
         registeredAt: Date.now(),
       });
       discovered.push(dedupedName);
-      log(`IPC: discover found session ${itermId} ("${dedupedName}")`);
+      log(`discover: found session ${itermId} ("${dedupedName}")`);
     }
   }
 
-  sendResponse(socket, { id, ok: true, result: { alive, pruned, discovered } });
+  // Persist the updated registry after any mutations
+  if (pruned.length > 0 || discovered.length > 0) {
+    saveSessionRegistry();
+  }
+
+  return { alive, pruned, discovered };
+}
+
+// IPC handler wrapper for discoverSessions.
+function handleDiscover(socket: Socket, id: string): void {
+  const result = discoverSessions();
+  sendResponse(socket, { id, ok: true, result });
   socket.end();
 }
 
@@ -1006,6 +1021,7 @@ async function handleRequest(
       clientQueues.set(sessionId, []);
     }
     log(`IPC: auto-registered client ${sessionId} (name: "${autoName}", iTerm: ${itermId ?? "unknown"})`);
+    saveSessionRegistry();
   }
 
   switch (method) {
