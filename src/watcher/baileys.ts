@@ -305,6 +305,12 @@ export async function connectWatcher(
         }
 
         log(`WhatsApp connected. Phone: +${watcherStatus.phoneNumber ?? "unknown"}`);
+
+        // Send a startup confirmation to WhatsApp so remote users know
+        // the watcher is alive (especially useful after /restart).
+        import("./send.js").then(({ watcherSendMessage }) => {
+          watcherSendMessage("Whazaa watcher started.").catch(() => {});
+        }).catch(() => {});
       }
 
       if (connection === "close") {

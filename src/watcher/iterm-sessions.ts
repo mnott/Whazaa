@@ -45,6 +45,7 @@ import {
   activeItermSessionId,
   setActiveItermSessionId,
   clientQueues,
+  updateSessionTtyCache,
 } from "./state.js";
 import { watcherSendMessage } from "./send.js";
 import { saveSessionRegistry } from "./persistence.js";
@@ -765,6 +766,9 @@ export function getSessionList(): Array<{
   // + N×getItermSessionVar + isClaudeRunningInSession
   const snapshot = snapshotAllSessions();
   const snapshotIds = new Set(snapshot.map((s) => s.id));
+
+  // Refresh the PTY cache so the locked-screen fallback has fresh TTY paths
+  updateSessionTtyCache(snapshot);
 
   // Filter for Claude sessions (tab name contains "claude")
   const claudeSnapshots = snapshot.filter((s) =>

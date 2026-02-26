@@ -45,6 +45,23 @@ export const sessionRegistry = new Map<string, RegisteredSession>();
 export const managedSessions = new Map<string, { name: string; createdAt: number }>();
 
 /**
+ * Cache mapping iTerm2 session UUID → TTY device path (e.g. "/dev/ttys003").
+ * Populated whenever snapshotAllSessions() runs (via getSessionList, discoverSessions).
+ * Used by the PTY write fallback when the screen is locked and AppleScript
+ * cannot interact with iTerm2.
+ */
+export const sessionTtyCache = new Map<string, string>();
+
+/**
+ * Overwrite the TTY cache with the latest snapshot data.
+ */
+export function updateSessionTtyCache(entries: Array<{ id: string; tty: string }>): void {
+  for (const { id, tty } of entries) {
+    if (tty) sessionTtyCache.set(id, tty);
+  }
+}
+
+/**
  * The TERM_SESSION_ID of the MCP client that should receive the next incoming
  * WhatsApp message.  Updated when a client calls `whatsapp_receive` and when
  * the `/N` switch command routes delivery to a different session.

@@ -65,6 +65,8 @@ import {
   managedSessions,
   watcherStatus,
   dispatchIncomingMessage,
+  sessionTtyCache,
+  updateSessionTtyCache,
 } from "./state.js";
 import {
   getSessionList,
@@ -91,6 +93,8 @@ import {
   sendKeystrokeToSession,
   sendEscapeSequenceToSession,
   stripItermPrefix,
+  writeToTty,
+  snapshotAllSessions,
 } from "./iterm-core.js";
 import { startTypingIndicator } from "./typing.js";
 import { log } from "./log.js";
@@ -179,8 +183,36 @@ export function createMessageHandler(
     // Direct type failed. Before searching/creating, check if the screen is
     // locked — AppleScript calls to iTerm2 hang or fail when locked, so we
     // must NOT create zombie sessions.
+    // PTY write fallback: bypass iTerm2 entirely by writing to the TTY device.
     if (isScreenLocked()) {
-      log("Screen is locked — cannot deliver to iTerm2. Message queued for IPC only.");
+      const targetId = bareSessionId || activeSessionId;
+      let ttyPath = targetId ? sessionTtyCache.get(targetId) : undefined;
+
+      // If cache is empty, try a one-shot snapshot refresh — reading session
+      // properties via AppleScript often still works on locked screens even
+      // though GUI interaction (typing, clicking) does not.
+      if (!ttyPath) {
+        log("Screen locked — TTY cache miss, attempting live snapshot refresh");
+        const fresh = snapshotAllSessions();
+        updateSessionTtyCache(fresh);
+        ttyPath = targetId ? sessionTtyCache.get(targetId) : undefined;
+        // If still no match, try any available TTY from the refresh
+        if (!ttyPath && fresh.length > 0) {
+          ttyPath = fresh[0].tty;
+          log(`Screen locked — falling back to first available TTY: ${ttyPath}`);
+        }
+      }
+
+      if (ttyPath) {
+        log(`Screen locked — PTY write fallback to ${ttyPath}`);
+        if (writeToTty(ttyPath, text)) {
+          setConsecutiveFailures(0);
+          return true;
+        }
+        log(`PTY write fallback failed for ${ttyPath}`);
+      } else {
+        log("Screen locked — no TTY available for PTY fallback");
+      }
       setConsecutiveFailures(getConsecutiveFailures() + 1);
       return false;
     }
