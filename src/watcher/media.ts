@@ -105,7 +105,7 @@ export const WHISPER_BIN =
  * model name recognised by your Whisper installation (e.g. `"base"`,
  * `"small"`, `"medium"`, `"large-v3"`).
  */
-export const WHISPER_MODEL = process.env.WHAZAA_WHISPER_MODEL || "large-v3-turbo";
+export const WHISPER_MODEL = process.env.WHAZAA_WHISPER_MODEL || "small";
 
 /**
  * Download a Baileys audio message to a temp file and transcribe it with Whisper.

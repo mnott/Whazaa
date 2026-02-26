@@ -38,7 +38,11 @@ export async function watcherSendMessage(message: string, recipient?: string): P
   // Stop the typing indicator before sending — Claude is done thinking.
   stopTypingIndicator();
 
-  const text = markdownToWhatsApp(message);
+  // Prepend U+FEFF (zero-width no-break space) as an invisible marker so
+  // external apps (e.g. a mobile companion) can distinguish PAI-sent messages
+  // from user-typed ones in the self-chat. The marker is invisible in WhatsApp
+  // but detectable at position 0 programmatically.
+  const text = "\uFEFF" + markdownToWhatsApp(message);
   const result = await watcherSock.sendMessage(targetJid, { text });
 
   if (result?.key?.id) {

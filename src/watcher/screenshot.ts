@@ -69,67 +69,111 @@ import { listClaudeSessions } from "./iterm-sessions.js";
  */
 export async function handleTextScreenshot(): Promise<void> {
   try {
-    // Resolve the target iTerm2 session UUID (same priority chain as handleScreenshot)
+    // Build a list of candidate iTerm2 session UUIDs to try (best-first order).
+    // If the first one is stale (tab closed, process killed), we try the rest.
+    const candidates: Array<{ id: string; source: string }> = [];
+
     const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
-    let itermSessionId = stripItermPrefix(
+    const primaryId = stripItermPrefix(
       (activeItermSessionId || undefined) ?? activeEntry?.itermSessionId
     );
+    if (primaryId) {
+      candidates.push({ id: primaryId, source: "active" });
+    }
 
-    if (!itermSessionId) {
-      const registryEntries = [...sessionRegistry.values()]
-        .sort((a, b) => b.registeredAt - a.registeredAt);
-      const newest = registryEntries.find((e) => e.itermSessionId);
-      if (newest?.itermSessionId) {
-        itermSessionId = stripItermPrefix(newest.itermSessionId);
+    // Add all registry sessions as fallbacks (sorted newest-first)
+    const registryEntries = [...sessionRegistry.values()]
+      .sort((a, b) => b.registeredAt - a.registeredAt);
+    for (const entry of registryEntries) {
+      const rid = stripItermPrefix(entry.itermSessionId);
+      if (rid && !candidates.some((c) => c.id === rid)) {
+        candidates.push({ id: rid, source: `registry:${entry.name}` });
       }
     }
 
-    if (!itermSessionId) {
+    if (candidates.length === 0) {
       await watcherSendMessage(
         "Screen is locked and no iTerm2 session found — cannot capture."
       ).catch(() => {});
       return;
     }
 
-    // Get the terminal buffer contents via AppleScript
-    const script = `tell application "iTerm2"
+    log(`/ss text: ${candidates.length} candidate(s): ${candidates.map((c) => `${c.id.slice(0, 8)}… (${c.source})`).join(", ")}`);
+
+    // Try each candidate until one returns buffer content.
+    // Use a longer timeout (10s) — macOS deprioritises iTerm2 when the screen
+    // is locked, so AppleScript calls can be slow.
+    for (const candidate of candidates) {
+      const script = `tell application "iTerm2"
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
-        if id of s is "${itermSessionId}" then
+        if id of s is "${candidate.id}" then
           return contents of s
         end if
       end repeat
     end repeat
   end repeat
-  return ""
+  return "::NOT_FOUND::"
 end tell`;
 
-    const contents = runAppleScript(script);
-    if (!contents || contents.trim() === "") {
+      const result = spawnSync("osascript", [], {
+        input: script,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 10_000,
+      });
+
+      const exitCode = result.status;
+      const stdout = result.stdout?.toString().trim() ?? "";
+      const stderr = result.stderr?.toString().trim() ?? "";
+      const timedOut = result.signal === "SIGTERM";
+
+      if (timedOut) {
+        log(`/ss text: ${candidate.source} (${candidate.id.slice(0, 8)}…) — timed out after 10s`);
+        continue;
+      }
+
+      if (exitCode !== 0) {
+        log(`/ss text: ${candidate.source} (${candidate.id.slice(0, 8)}…) — AppleScript error (exit ${exitCode}): ${stderr}`);
+        continue;
+      }
+
+      if (stdout === "::NOT_FOUND::") {
+        log(`/ss text: ${candidate.source} (${candidate.id.slice(0, 8)}…) — session not found in iTerm2`);
+        continue;
+      }
+
+      if (stdout === "") {
+        log(`/ss text: ${candidate.source} (${candidate.id.slice(0, 8)}…) — buffer empty`);
+        continue;
+      }
+
+      // Got content — send it
+      const maxLen = 4000;
+      const trimmed =
+        stdout.length > maxLen
+          ? "...\n" + stdout.slice(-maxLen)
+          : stdout;
+
       await watcherSendMessage(
-        "Screen is locked — could not read terminal buffer (empty)."
+        `*Terminal capture (screen locked):*\n\n\`\`\`\n${trimmed}\n\`\`\``
       ).catch(() => {});
+
+      log(`/ss: text capture sent via ${candidate.source} (${candidate.id.slice(0, 8)}…)`);
       return;
     }
 
-    // Trim to last ~4000 chars to stay within WhatsApp message limits
-    const maxLen = 4000;
-    const trimmed =
-      contents.length > maxLen
-        ? "...\n" + contents.slice(-maxLen)
-        : contents;
-
+    // All candidates exhausted — report what happened
+    const summary = candidates.map((c) => `${c.source}`).join(", ");
+    log(`/ss text: all ${candidates.length} candidate(s) failed: ${summary}`);
     await watcherSendMessage(
-      `*Terminal capture (screen locked):*\n\n\`\`\`\n${trimmed}\n\`\`\``
+      `Screen is locked — tried ${candidates.length} session(s) but none returned buffer content. Check watcher logs.`
     ).catch(() => {});
-
-    log("/ss: text capture sent (screen locked fallback)");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log(`/ss: text capture error — ${msg}`);
     await watcherSendMessage(
-      `Screen is locked — text capture also failed: ${msg}`
+      `Screen is locked — text capture failed: ${msg}`
     ).catch(() => {});
   }
 }

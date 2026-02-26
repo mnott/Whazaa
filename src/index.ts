@@ -62,10 +62,45 @@ function errorResponse(err: unknown) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
 }
 
-const server = new McpServer({
-  name: "whazaa",
-  version: "0.1.0",
-});
+const server = new McpServer(
+  {
+    name: "whazaa",
+    version: "0.1.0",
+  },
+  {
+    instructions: [
+      "## Whazaa — WhatsApp Bridge for Claude Code",
+      "",
+      "Whazaa connects Claude Code to WhatsApp via a self-chat watcher. Messages from",
+      "WhatsApp are automatically prefixed so you can distinguish their source and route",
+      "replies correctly.",
+      "",
+      "### Message Source Detection",
+      "",
+      "| Prefix | Source | Reply with |",
+      "|--------|--------|------------|",
+      "| `[Whazaa]` | Text message from WhatsApp | `whatsapp_send` (text reply) |",
+      "| `[Whazaa:voice]` | Voice note from WhatsApp (transcribed) | `whatsapp_tts` (voice reply) |",
+      "| _no prefix_ | User typing at the terminal | Terminal only — do NOT send to WhatsApp |",
+      "",
+      "### Rules",
+      "",
+      "- **Strip the prefix** before processing the message content.",
+      "- **Match the medium**: text in → text out, voice in → voice out.",
+      "- **Same content**: send the same response as the terminal — do not shorten or paraphrase.",
+      "- **Text formatting**: use **bold** and *italic* only for whatsapp_send. No markdown headers or code blocks.",
+      "- **Voice formatting**: NEVER use asterisks or any markdown in whatsapp_tts messages. TTS reads them literally as 'asterisk'. Write plain conversational text only.",
+      "- **Acknowledge long tasks**: if a [Whazaa] task will take more than a few seconds, immediately send a brief ack via whatsapp_send/whatsapp_tts BEFORE starting work. Never leave WhatsApp silent.",
+      "- **Per-message toggle**: this switches automatically with every message. No manual on/off needed.",
+      "",
+      "### Companion App Message Detection",
+      "",
+      "All outgoing messages are tagged so companion apps can distinguish PAI from user:",
+      "- **Text messages**: prefixed with U+FEFF (zero-width no-break space, invisible in WhatsApp).",
+      "- **All messages (text + voice)**: Baileys message IDs start with `3EB0`. User phone IDs do not.",
+    ].join("\n"),
+  },
+);
 
 // Shared IPC client — one per MCP server process, bound to the session
 // identified by TERM_SESSION_ID (set by iTerm2).
