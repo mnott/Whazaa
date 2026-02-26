@@ -504,15 +504,18 @@ end tell`;
       }
       (async () => {
         const sid = activeItermSessionId;
-        // Wait for the MCP tool call (or WhatsApp message processing) to
-        // complete so Claude is back at the prompt before we type /clear.
-        await new Promise((r) => setTimeout(r, 3000));
+        // Send Ctrl+C first to interrupt any ongoing Claude generation.
+        // Without this, Claude may still be outputting text when /clear
+        // arrives (especially when /c is invoked via MCP from the same
+        // session that's about to be cleared).
+        sendKeystrokeToSession(sid, 3); // ASCII 3 = Ctrl+C / ETX
+        await new Promise((r) => setTimeout(r, 2000));
         typeIntoSession(sid, "/clear");
         // /clear can take 5-10s+ (context compression, hook scripts, etc.).
         // Paste "go" first without Enter, then send Enter after a second
         // delay — this avoids the race where Enter arrives while Claude is
         // still processing /clear and gets swallowed as a literal newline.
-        await new Promise((r) => setTimeout(r, 4000));
+        await new Promise((r) => setTimeout(r, 8000));
         pasteTextIntoSession(sid, "go");
         await new Promise((r) => setTimeout(r, 500));
         sendKeystrokeToSession(sid, 13);
