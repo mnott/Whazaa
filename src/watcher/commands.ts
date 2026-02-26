@@ -128,6 +128,57 @@ export function createMessageHandler(
 ): (text: string, timestamp: number) => void | Promise<void> {
 
   /**
+   * Validate `activeItermSessionId` against live iTerm2 sessions and
+   * auto-discover a target if the current one is stale or unset.
+   *
+   * This is the shared session-resolution logic used by `/c`, `/p`, keyboard
+   * commands, and `/s`.  It does NOT send anything to WhatsApp — callers
+   * decide what (if anything) to tell the user.
+   *
+   * @returns The validated `activeItermSessionId` (may still be empty if no
+   *   sessions exist at all).
+   */
+  function ensureActiveSession(): string {
+    const allSessions = getSessionList();
+    const allSessionIds = new Set(allSessions.map((s) => s.id));
+
+    // Prune stale registry entries
+    for (const [sid, entry] of sessionRegistry) {
+      if (entry.itermSessionId && !allSessionIds.has(entry.itermSessionId)) {
+        sessionRegistry.delete(sid);
+        clientQueues.delete(sid);
+        if (activeClientId === sid) {
+          const remaining = [...sessionRegistry.values()].sort((a, b) => b.registeredAt - a.registeredAt);
+          setActiveClientId(remaining.length > 0 ? remaining[0].sessionId : null);
+        }
+      }
+    }
+
+    // Clear stale activeItermSessionId
+    if (activeItermSessionId && !allSessionIds.has(activeItermSessionId)) {
+      log(`ensureActiveSession: ${activeItermSessionId.slice(0, 8)}… not in live sessions — clearing`);
+      setActiveItermSessionId("");
+    }
+
+    // Auto-discover: prefer busy Claude, then any Claude, then first session
+    if (!activeItermSessionId && allSessions.length > 0) {
+      const busy = allSessions.find((s) => s.type === "claude" && !s.atPrompt);
+      const anyClaudeSession = allSessions.find((s) => s.type === "claude");
+      const pick = busy ?? anyClaudeSession ?? allSessions[0];
+      if (pick) {
+        setActiveSessionId(pick.id);
+        setActiveItermSessionId(pick.id);
+        log(`ensureActiveSession: auto-selected ${pick.name} (${pick.id.slice(0, 8)}…)`);
+      }
+    }
+
+    // Keep session list cache fresh for /N
+    setCachedSessionList(allSessions, Date.now());
+
+    return activeItermSessionId;
+  }
+
+  /**
    * Deliver a plain text message to the active iTerm2 session.
    *
    * Uses a multi-step fallback strategy so messages are never silently dropped
@@ -319,49 +370,15 @@ export function createMessageHandler(
 
     // --- /sessions (aliases: /s) — list sessions ------------------------------
     if (trimmedText === "/sessions" || trimmedText === "/s") {
-      // Clean up stale registry entries by cross-referencing live iTerm2 sessions
-      const allSessions = getSessionList();
-      const allSessionIds = new Set(allSessions.map((s) => s.id));
-      for (const [sid, entry] of sessionRegistry) {
-        if (entry.itermSessionId && !allSessionIds.has(entry.itermSessionId)) {
-          sessionRegistry.delete(sid);
-          clientQueues.delete(sid);
-          if (activeClientId === sid) {
-            const remaining = [...sessionRegistry.values()].sort((a, b) => b.registeredAt - a.registeredAt);
-            setActiveClientId(remaining.length > 0 ? remaining[0].sessionId : null);
-          }
-        }
-      }
+      ensureActiveSession();
+
+      // Re-read the (now pruned/updated) cached session list
+      const allSessions = cachedSessionList ?? getSessionList();
 
       if (allSessions.length === 0 && sessionRegistry.size === 0) {
         watcherSendMessage("No sessions found.").catch(() => {});
         return;
       }
-
-      // Validate activeItermSessionId — if it points to a session not in the
-      // live list, clear it so auto-discovery can pick a valid one.
-      if (activeItermSessionId && !allSessionIds.has(activeItermSessionId)) {
-        log(`/s: activeItermSessionId ${activeItermSessionId.slice(0, 8)}… not in live sessions — clearing`);
-        setActiveItermSessionId("");
-      }
-
-      // Auto-discover an active session if none is set (or was just cleared).
-      // Prefer a session where Claude is actively working (!atPrompt), but
-      // fall back to any Claude session — a session at the prompt is still
-      // a valid target for message delivery.
-      if (!activeItermSessionId && allSessions.length > 0) {
-        const busy = allSessions.find((s) => s.type === "claude" && !s.atPrompt);
-        const anyClaudeSession = allSessions.find((s) => s.type === "claude");
-        const pick = busy ?? anyClaudeSession ?? allSessions[0];
-        if (pick) {
-          setActiveSessionId(pick.id);
-          setActiveItermSessionId(pick.id);
-          log(`/s: auto-selected active session: ${pick.name} (${pick.id.slice(0, 8)}…)`);
-        }
-      }
-
-      // Cache the session list so /N uses the exact same ordering
-      setCachedSessionList(allSessions, Date.now());
 
       // Build display list: prefer user.paiName session variable, then registry,
       // then cwd basename, then iTerm2 session name.
@@ -498,10 +515,12 @@ end tell`;
 
     // --- /c — send /clear then "go" to active Claude session ----------------
     if (trimmedText === "/c") {
+      ensureActiveSession();
       if (!activeItermSessionId) {
-        watcherSendMessage("No active session. Use /s to list and /N to select.").catch(() => {});
+        watcherSendMessage("No active session.").catch(() => {});
         return;
       }
+      watcherSendMessage("Clearing in ~10s…").catch(() => {});
       (async () => {
         const sid = activeItermSessionId;
         // Wait for the MCP tool response to return to Claude and for Claude
@@ -524,8 +543,9 @@ end tell`;
 
     // --- /p — send "pause session" to active Claude session -----------------
     if (trimmedText === "/p") {
+      ensureActiveSession();
       if (!activeItermSessionId) {
-        watcherSendMessage("No active session. Use /s to list and /N to select.").catch(() => {});
+        watcherSendMessage("No active session.").catch(() => {});
         return;
       }
       typeIntoSession(activeItermSessionId, "pause session");
@@ -562,8 +582,9 @@ end tell`;
       trimmedText === "/right" ||
       /^\/pick\s+(\d+)$/.test(trimmedText)
     ) {
+      ensureActiveSession();
       if (!activeItermSessionId) {
-        watcherSendMessage("No active session. Use /s to list and /N to select.").catch(() => {});
+        watcherSendMessage("No active session.").catch(() => {});
         return;
       }
 
