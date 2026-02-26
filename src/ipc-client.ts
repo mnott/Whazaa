@@ -157,6 +157,11 @@ export interface EndSessionResult {
   name: string;
 }
 
+export interface CommandResult {
+  executed: boolean;
+  command: string;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -312,6 +317,11 @@ export class WatcherClient {
   async endSession(target: string): Promise<EndSessionResult> {
     const result = await this.call("end_session", { target });
     return result as unknown as EndSessionResult;
+  }
+
+  async command(text: string): Promise<CommandResult> {
+    const result = await this.call("command", { text });
+    return result as unknown as CommandResult;
   }
 
   // -------------------------------------------------------------------------

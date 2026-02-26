@@ -266,6 +266,29 @@ export function setWatcherStatus(status: typeof watcherStatus): void {
 }
 
 // ---------------------------------------------------------------------------
+// Command handler reference
+// ---------------------------------------------------------------------------
+
+/**
+ * Reference to the message handler closure created by `createMessageHandler()`
+ * in `commands.ts` and wired up in `watch()`.
+ *
+ * Stored here so the IPC server can invoke watcher commands directly (e.g. when
+ * Claude calls `whatsapp_command` with "/c") without round-tripping through
+ * WhatsApp.  Set once during watcher startup; null before `watch()` runs.
+ */
+export let commandHandler: ((text: string, timestamp: number) => void) | null = null;
+
+/**
+ * Store the message handler so the IPC server can execute commands directly.
+ *
+ * @param handler  The `handleMessage(text, timestamp)` closure, or null to clear.
+ */
+export function setCommandHandler(handler: ((text: string, timestamp: number) => void) | null): void {
+  commandHandler = handler;
+}
+
+// ---------------------------------------------------------------------------
 // Self-echo suppression
 // ---------------------------------------------------------------------------
 

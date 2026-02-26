@@ -76,6 +76,7 @@ import {
   sentMessageIds,
   managedSessions,
   updateSessionTtyCache,
+  commandHandler,
 } from "./state.js";
 import {
   resolveJid,
@@ -1097,6 +1098,38 @@ export function discoverSessions(): { alive: string[]; pruned: string[]; discove
   return { alive, pruned, discovered };
 }
 
+// Execute a watcher command directly (bypasses WhatsApp round-trip).
+function handleCommand(
+  socket: Socket,
+  id: string,
+  params: Record<string, unknown>,
+): void {
+  const text = params.text != null ? String(params.text) : "";
+  if (!text) {
+    sendResponse(socket, { id, ok: false, error: "text is required" });
+    socket.end();
+    return;
+  }
+
+  if (!commandHandler) {
+    sendResponse(socket, { id, ok: false, error: "Command handler not initialized — watcher may still be starting." });
+    socket.end();
+    return;
+  }
+
+  try {
+    // Fire-and-forget: handleMessage is sync but commands within it may use
+    // async AppleScript calls and setTimeout delays (e.g. /c waits 4s).
+    // We respond immediately — the command outcome is reported via WhatsApp.
+    commandHandler(text, Date.now());
+    sendResponse(socket, { id, ok: true, result: { executed: true, command: text } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendResponse(socket, { id, ok: false, error: msg });
+  }
+  socket.end();
+}
+
 // IPC handler wrapper for discoverSessions.
 function handleDiscover(socket: Socket, id: string): void {
   const result = discoverSessions();
@@ -1169,6 +1202,7 @@ async function handleRequest(
     case "tts":          return handleTts(socket, id, params);
     case "speak":        return handleSpeak(socket, id, params);
     case "voice_config": return handleVoiceConfig(socket, id, params);
+    case "command":      return handleCommand(socket, id, params);
     case "discover":     return handleDiscover(socket, id);
     case "sessions":     return handleSessions(socket, id);
     case "switch":       return handleSwitch(socket, id, params);
