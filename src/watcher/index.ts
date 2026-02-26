@@ -52,8 +52,10 @@ import {
   setActiveItermSessionId,
 } from "./state.js";
 import { connectWatcher } from "./baileys.js";
-import { startIpcServer } from "./ipc-server.js";
+import { startIpcServer, discoverSessions } from "./ipc-server.js";
 import { createMessageHandler } from "./commands.js";
+import { loadSessionRegistry } from "./persistence.js";
+import { log } from "./log.js";
 
 // --- Main loop ---------------------------------------------------------------
 
@@ -115,6 +117,13 @@ export async function watch(rawSessionId?: string): Promise<void> {
     }
   );
   cleanupWatcher = cleanup;
+
+  // Restore persisted sessions and auto-discover active iTerm2 sessions
+  loadSessionRegistry();
+  const disc = discoverSessions();
+  if (disc.alive.length > 0 || disc.discovered.length > 0) {
+    log(`Startup: ${disc.alive.length} restored, ${disc.discovered.length} discovered, ${disc.pruned.length} pruned`);
+  }
 
   // Start the IPC server
   ipcServer = startIpcServer(triggerLogin);

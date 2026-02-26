@@ -124,33 +124,19 @@ export async function textToVoiceNote(
     `[whazaa-tts] Generating audio: voice=${resolvedVoice}, text="${text.slice(0, 60)}${text.length > 60 ? "..." : ""}"\n`
   );
 
-  // Stream audio sentence-by-sentence to avoid the 512 phoneme token limit
-  // that causes silent truncation when using generate() on long texts.
-  const chunks: Float32Array[] = [];
-  let sampleRate = 24_000;
-  let totalSamples = 0;
+  // Use generate() instead of stream() — stream() deadlocks on an ONNX
+  // runtime mutex bug (libc++ "mutex lock failed: Invalid argument").
+  // generate() handles long texts fine without truncation.
+  const result = await ttsInstance!.generate(text, { voice: resolvedVoice });
+  const combined: Float32Array = result.audio;
+  const sampleRate: number = result.sampling_rate ?? 24_000;
 
-  for await (const chunk of ttsInstance!.stream(text, { voice: resolvedVoice })) {
-    const chunkAudio = chunk.audio as { audio: Float32Array; sampling_rate: number };
-    sampleRate = chunkAudio.sampling_rate ?? 24_000;
-    chunks.push(chunkAudio.audio);
-    totalSamples += chunkAudio.audio.length;
-  }
-
-  if (chunks.length === 0) {
-    throw new Error("TTS: stream produced no audio chunks");
-  }
-
-  // Concatenate all Float32Array chunks into one
-  const combined = new Float32Array(totalSamples);
-  let offset = 0;
-  for (const chunk of chunks) {
-    combined.set(chunk, offset);
-    offset += chunk.length;
+  if (combined.length === 0) {
+    throw new Error("TTS: generate produced no audio");
   }
 
   process.stderr.write(
-    `[whazaa-tts] Generated ${totalSamples} samples at ${sampleRate} Hz (${chunks.length} chunk${chunks.length !== 1 ? "s" : ""})\n`
+    `[whazaa-tts] Generated ${combined.length} samples at ${sampleRate} Hz\n`
   );
 
   // Temp file paths
@@ -224,30 +210,16 @@ export async function speakLocally(text: string, voice?: string): Promise<void> 
     `[whazaa-tts] Speaking locally: voice=${resolvedVoice}, text="${text.slice(0, 60)}${text.length > 60 ? "..." : ""}"\n`
   );
 
-  const speakChunks: Float32Array[] = [];
-  let speakSampleRate = 24_000;
-  let speakTotalSamples = 0;
+  const speakResult = await ttsInstance!.generate(text, { voice: resolvedVoice });
+  const speakAudio: Float32Array = speakResult.audio;
+  const speakSampleRate: number = speakResult.sampling_rate ?? 24_000;
 
-  for await (const chunk of ttsInstance!.stream(text, { voice: resolvedVoice })) {
-    const chunkAudio = chunk.audio as { audio: Float32Array; sampling_rate: number };
-    speakSampleRate = chunkAudio.sampling_rate ?? 24_000;
-    speakChunks.push(chunkAudio.audio);
-    speakTotalSamples += chunkAudio.audio.length;
-  }
-
-  if (speakChunks.length === 0) {
-    throw new Error("TTS: stream produced no audio chunks");
-  }
-
-  const speakCombined = new Float32Array(speakTotalSamples);
-  let speakOffset = 0;
-  for (const chunk of speakChunks) {
-    speakCombined.set(chunk, speakOffset);
-    speakOffset += chunk.length;
+  if (speakAudio.length === 0) {
+    throw new Error("TTS: generate produced no audio");
   }
 
   const wavPath = join(tmpdir(), `whazaa-speak-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`);
-  writeFileSync(wavPath, float32ToWav(speakCombined, speakSampleRate));
+  writeFileSync(wavPath, float32ToWav(speakAudio, speakSampleRate));
 
   // Play via afplay (macOS built-in). Detached + unref so the watcher is not
   // blocked waiting for playback to finish.
