@@ -1121,7 +1121,22 @@ async function handleRequest(
     // to avoid blocking the event loop and causing Baileys WebSocket timeouts.
     const itermHint = request.itermSessionId ?? sessionId;
     const itermId = stripItermPrefix(itermHint) ?? itermHint;
-    const autoName = "Unknown";
+
+    // Clean up discovered-* or other stale entries for this iTerm session
+    // (same logic as handleRegister) to prevent duplicates.
+    let inheritedName: string | null = null;
+    if (itermId) {
+      for (const [sid, entry] of sessionRegistry) {
+        if (sid !== sessionId && entry.itermSessionId === itermId) {
+          inheritedName = entry.name !== "Unknown" ? entry.name : null;
+          log(`IPC: auto-reg removing stale entry ${sid} ("${entry.name}") — replaced by ${sessionId}`);
+          sessionRegistry.delete(sid);
+          clientQueues.delete(sid);
+        }
+      }
+    }
+
+    const autoName = inheritedName ?? "Unknown";
     sessionRegistry.set(sessionId, {
       sessionId,
       name: autoName,
