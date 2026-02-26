@@ -136,6 +136,24 @@ export function sendEscapeSequenceToSession(sessionId: string, dirChar: string):
  *   or the text delivery AppleScript call failed.
  */
 export function typeIntoSession(sessionId: string, text: string): boolean {
+  if (!pasteTextIntoSession(sessionId, text)) return false;
+
+  // Send Enter as a separate call so long text paste can't timeout before Enter fires
+  sendKeystrokeToSession(sessionId, 13);
+  return true;
+}
+
+/**
+ * Paste text into an iTerm2 session *without* pressing Enter afterwards.
+ *
+ * Useful when the caller needs to control the timing of the Enter keypress
+ * separately — e.g. to wait for a command prompt to be ready before submitting.
+ *
+ * @param sessionId - The iTerm2 session UUID.
+ * @param text - The text to paste.
+ * @returns `true` if the text was delivered; `false` otherwise.
+ */
+export function pasteTextIntoSession(sessionId: string, text: string): boolean {
   const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
   const textScript = withSessionAppleScript(
@@ -144,12 +162,7 @@ export function typeIntoSession(sessionId: string, text: string): boolean {
     'return "not_found"'
   );
 
-  const result = runAppleScript(textScript);
-  if (result !== "ok") return false;
-
-  // Send Enter as a separate call so long text paste can't timeout before Enter fires
-  sendKeystrokeToSession(sessionId, 13);
-  return true;
+  return runAppleScript(textScript) === "ok";
 }
 
 /**

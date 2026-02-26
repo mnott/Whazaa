@@ -456,6 +456,56 @@ end tell`;
 
   log(`/t: opened terminal "${label}" (session ${result})`);
   watcherSendMessage(`Opened terminal *${label}* ← active`).catch(() => {});
+
+  // If a command was run, capture its output after a delay and relay it.
+  if (command) {
+    const sessionId = result;
+    (async () => {
+      // Wait for the command to produce output. Most quick commands (pwd, ls,
+      // ps, pkill) finish within 2s. We poll twice to catch slower commands.
+      for (const delay of [2000, 3000]) {
+        await new Promise((r) => setTimeout(r, delay));
+        const bufferScript = `tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if id of s is "${sessionId}" then
+          return contents of s
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`;
+        const contents = runAppleScript(bufferScript);
+        if (contents && contents.trim().length > 0) {
+          // The buffer includes the shell prompt, command, and output.
+          // Split into lines, skip the first line (prompt + command), and trim trailing prompt.
+          const lines = contents.split("\n");
+          // Find the command in the buffer to skip past it
+          const cmdIdx = lines.findIndex((l) => l.includes(command));
+          const outputLines = cmdIdx >= 0 ? lines.slice(cmdIdx + 1) : lines;
+          // Drop trailing empty lines and the final shell prompt
+          while (outputLines.length > 0 && outputLines[outputLines.length - 1].trim() === "") {
+            outputLines.pop();
+          }
+          // If the last line looks like a prompt (ends with $ or % or #), drop it
+          if (outputLines.length > 0 && /[%$#>]\s*$/.test(outputLines[outputLines.length - 1])) {
+            outputLines.pop();
+          }
+          const output = outputLines.join("\n").trim();
+          if (output.length > 0) {
+            const maxLen = 3000;
+            const trimmed = output.length > maxLen ? output.slice(0, maxLen) + "\n..." : output;
+            await watcherSendMessage(trimmed).catch(() => {});
+            log(`/t: relayed ${output.length} chars of output for "${command}"`);
+            return;
+          }
+        }
+      }
+      log(`/t: no output captured for "${command}"`);
+    })().catch((err) => log(`/t: output capture error — ${err}`));
+  }
 }
 
 /**
@@ -735,17 +785,19 @@ export function getSessionList(): Array<{
 
   const seenIds = new Set(claudeSessions.map((s) => s.id));
 
-  // Merge registered MCP sessions not found by tab-name scan
+  // Merge registered MCP sessions not found by tab-name scan.
+  // Only include entries whose iTerm2 session is still alive in the snapshot —
+  // otherwise dead registry entries become ghosts that /s shows but /N can't find.
   for (const [, entry] of sessionRegistry) {
-    if (entry.itermSessionId && !seenIds.has(entry.itermSessionId)) {
-      const snap = snapshot.find((s) => s.id === entry.itermSessionId);
+    if (entry.itermSessionId && !seenIds.has(entry.itermSessionId) && snapshotIds.has(entry.itermSessionId)) {
+      const snap = snapshot.find((s) => s.id === entry.itermSessionId)!;
       claudeSessions.push({
         id: entry.itermSessionId,
         name: entry.name,
         path: "",
         type: "claude" as const,
-        paiName: snap?.paiName ?? null,
-        atPrompt: snap?.atPrompt ?? true,
+        paiName: snap.paiName,
+        atPrompt: snap.atPrompt,
       });
       seenIds.add(entry.itermSessionId);
     }

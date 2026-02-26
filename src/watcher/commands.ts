@@ -87,6 +87,7 @@ import {
   isClaudeRunningInSession,
   isScreenLocked,
   typeIntoSession,
+  pasteTextIntoSession,
   sendKeystrokeToSession,
   sendEscapeSequenceToSession,
   stripItermPrefix,
@@ -251,6 +252,9 @@ export function createMessageHandler(
         "/c — Send /clear + go to Claude",
         "/p — Send \"pause session\" to Claude",
         "/ss — Screenshot",
+        "",
+        "*Watcher*",
+        "/restart — Restart the Whazaa watcher",
         "",
         "*Keys*",
         "/cc — Ctrl+C",
@@ -428,6 +432,18 @@ end tell`;
       return;
     }
 
+    // --- /restart — restart the watcher process (launchd auto-restarts) -------
+    if (trimmedText === "/restart") {
+      log("/restart: watcher restart requested via WhatsApp");
+      watcherSendMessage("Restarting Whazaa watcher...").catch(() => {});
+      // Give the message time to send before exiting
+      setTimeout(() => {
+        log("/restart: exiting — launchd will restart us");
+        process.exit(0);
+      }, 1500);
+      return;
+    }
+
     // --- /ss, /screenshot — capture and send iTerm2 window screenshot ---------
     if (trimmedText === "/ss" || trimmedText === "/screenshot") {
       handleScreenshot().catch((err) => {
@@ -443,9 +459,16 @@ end tell`;
         return;
       }
       (async () => {
-        typeIntoSession(activeItermSessionId, "/clear");
-        await new Promise((r) => setTimeout(r, 1500));
-        typeIntoSession(activeItermSessionId, "go");
+        const sid = activeItermSessionId;
+        typeIntoSession(sid, "/clear");
+        // /clear can take 3-5s+ (context compression, hook scripts, etc.).
+        // Paste "go" first without Enter, then send Enter after a second
+        // delay — this avoids the race where Enter arrives while Claude is
+        // still processing /clear and gets swallowed as a literal newline.
+        await new Promise((r) => setTimeout(r, 4000));
+        pasteTextIntoSession(sid, "go");
+        await new Promise((r) => setTimeout(r, 500));
+        sendKeystrokeToSession(sid, 13);
         watcherSendMessage("Sent /clear + go").catch(() => {});
       })().catch((err) => log(`/c: error — ${err}`));
       return;
@@ -623,8 +646,22 @@ end tell`;
     // Dispatch to IPC clients (additive — does not replace iTerm2 delivery)
     dispatchIncomingMessage(text, timestamp);
 
+    // Prefix non-slash messages with [Whazaa] or [Whazaa:voice] so Claude
+    // knows the message came from WhatsApp and should reply there.
+    // Voice transcripts (starting with "[Voice note]" or "[Audio]") get the
+    // :voice variant so Claude responds with a voice note too.
+    // Slash commands (e.g. /exit, /clear) are forwarded verbatim.
+    let textToDeliver: string;
+    if (trimmedText.startsWith("/")) {
+      textToDeliver = text;
+    } else if (/^\[(?:Voice note|Audio)\]:/.test(trimmedText)) {
+      textToDeliver = `[Whazaa:voice] ${text}`;
+    } else {
+      textToDeliver = `[Whazaa] ${text}`;
+    }
+
     // Deliver to iTerm2 (always)
-    const delivered = deliverMessage(text);
+    const delivered = deliverMessage(textToDeliver);
 
     // Show typing indicator so the user sees Claude is processing.
     // Only start if delivery succeeded — no point indicating if nothing was typed.
