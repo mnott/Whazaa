@@ -20,9 +20,10 @@
  *
  * | Pattern              | Description |
  * |----------------------|-------------|
- * | `/relocate <path>`   | `cd` the active session to `<path>` (alias: `/r`). |
+ * | `/h`, `/help`        | Show available commands. |
  * | `/s`, `/sessions`    | List all iTerm2 sessions with type, name, and active marker. |
  * | `/<N> [name]`        | Switch focus to session number N; optionally rename it. |
+ * | `/n <path>`          | Open Claude in `<path>` (alias: `/new`, `/relocate`). |
  * | `/t [cmd]`           | Open a new raw terminal tab; optionally run a command. |
  * | `/ss`, `/screenshot` | Capture the iTerm2 window and send it back via WhatsApp. |
  * | `/cc`                | Send Ctrl+C to the active session (interrupt). |
@@ -31,7 +32,10 @@
  * | `/tab`               | Send Tab (completion) to the active session. |
  * | `/up`/`/down`/`/left`/`/right` | Send arrow-key escape sequences. |
  * | `/pick N [text]`     | Navigate down (N-1) items then press Enter; optionally type text. |
- * | `/kill N`, `/k N`    | Kill session N (Claude or terminal). |
+ * | `/c`                 | Send `/clear` + `go` to active Claude session. |
+ * | `/p`                 | Send `pause session` to active Claude session. |
+ * | `/r N`, `/restart N` | Restart Claude in session N (kill process, relaunch). |
+ * | `/e N`, `/end N`     | End session N — close tab and remove from registry. |
  * | _anything else_      | Dispatch to IPC client queues **and** deliver to iTerm2. |
  *
  * Message delivery strategy (`deliverMessage`)
@@ -68,6 +72,7 @@ import {
   handleTerminal,
   handleKillSession,
   handleKillTerminalSession,
+  handleEndSession,
   getItermSessionVar,
   setItermSessionVar,
   setItermTabName,
@@ -80,6 +85,7 @@ import {
   runAppleScript,
   findClaudeSession,
   isClaudeRunningInSession,
+  isScreenLocked,
   typeIntoSession,
   sendKeystrokeToSession,
   sendEscapeSequenceToSession,
@@ -158,11 +164,24 @@ export function createMessageHandler(
       managedSessions.delete(bareSessionId);
     }
 
-    if (activeSessionId && isClaudeRunningInSession(activeSessionId)) {
+    // Fast path: try typing directly into the active session without verifying
+    // via AppleScript first. This avoids the expensive isClaudeRunningInSession
+    // call and works even when the screen is locked (typeIntoSession may still
+    // succeed if iTerm2 is accessible).
+    if (activeSessionId) {
       if (typeIntoSession(activeSessionId, text)) {
         setConsecutiveFailures(0);
         return true;
       }
+    }
+
+    // Direct type failed. Before searching/creating, check if the screen is
+    // locked — AppleScript calls to iTerm2 hang or fail when locked, so we
+    // must NOT create zombie sessions.
+    if (isScreenLocked()) {
+      log("Screen is locked — cannot deliver to iTerm2. Message queued for IPC only.");
+      setConsecutiveFailures(getConsecutiveFailures() + 1);
+      return false;
     }
 
     log(`${activeSessionId ? `Session ${activeSessionId} is not running Claude.` : "No cached session."} Searching for another...`);
@@ -212,9 +231,41 @@ export function createMessageHandler(
    *   provided by Baileys (used for queue ordering in IPC dispatch).
    */
   return function handleMessage(text: string, timestamp: number): void {
-    // --- /relocate <path> (alias: /r) ---------------------------------------
     const trimmedText = text.trim();
-    const relocateMatch = trimmedText.match(/^\/relocate\s+(.+)$/) || trimmedText.match(/^\/r\s+(.+)$/);
+
+    // --- /h, /help — show available commands --------------------------------
+    if (trimmedText === "/h" || trimmedText === "/help") {
+      const help = [
+        "*Whazaa Commands*",
+        "",
+        "*Sessions*",
+        "/s — List sessions",
+        "/N — Switch to session N",
+        "/N name — Switch & rename",
+        "/n path — Open Claude in directory",
+        "/t [cmd] — Open terminal tab",
+        "/r N — Restart Claude in session N",
+        "/e N — End session (close tab)",
+        "",
+        "*Session control*",
+        "/c — Send /clear + go to Claude",
+        "/p — Send \"pause session\" to Claude",
+        "/ss — Screenshot",
+        "",
+        "*Keys*",
+        "/cc — Ctrl+C",
+        "/esc — Escape",
+        "/enter — Enter",
+        "/tab — Tab",
+        "/up /down /left /right — Arrows",
+        "/pick N [text] — Menu select",
+      ].join("\n");
+      watcherSendMessage(help).catch(() => {});
+      return;
+    }
+
+    // --- /n <path> (aliases: /new, /relocate) — open Claude in directory ----
+    const relocateMatch = trimmedText.match(/^\/(?:n|new|relocate)\s+(.+)$/);
     if (relocateMatch) {
       const targetPath = relocateMatch[1].trim();
       if (targetPath) {
@@ -226,7 +277,7 @@ export function createMessageHandler(
         }
         return;
       }
-      log("/relocate: no path provided");
+      log("/n: no path provided");
       return;
     }
 
@@ -251,9 +302,10 @@ export function createMessageHandler(
         return;
       }
 
-      // If no active session tracked yet, auto-discover from live Claude sessions
+      // If no active session tracked yet, auto-discover from live Claude sessions.
+      // Uses pre-fetched atPrompt from the batched snapshot (no extra AppleScript).
       if (!activeItermSessionId && allSessions.length > 0) {
-        const firstClaude = allSessions.find((s) => s.type === "claude" && isClaudeRunningInSession(s.id));
+        const firstClaude = allSessions.find((s) => s.type === "claude" && !s.atPrompt);
         if (firstClaude) {
           setActiveSessionId(firstClaude.id);
           setActiveItermSessionId(firstClaude.id);
@@ -271,8 +323,7 @@ export function createMessageHandler(
           (e) => e.itermSessionId === s.id
         );
         // Read the persistent session variable set by setItermSessionVar
-        const paiName = getItermSessionVar(s.id);
-        const label = paiName
+        const label = s.paiName
           ?? (regEntry ? regEntry.name : null)
           ?? (s.path ? basename(s.path) : null)
           ?? s.name;
@@ -355,7 +406,7 @@ end tell`;
         }
 
         const displayName = newName
-          ?? getItermSessionVar(chosen.id)
+          ?? chosen.paiName
           ?? (regEntry ? regEntry.name : null)
           ?? (chosen.path ? basename(chosen.path) : chosen.name);
         log(`/sessions: switched to iTerm2 session ${chosen.id} (${displayName})`);
@@ -382,6 +433,32 @@ end tell`;
       handleScreenshot().catch((err) => {
         log(`/ss: unhandled error — ${err}`);
       });
+      return;
+    }
+
+    // --- /c — send /clear then "go" to active Claude session ----------------
+    if (trimmedText === "/c") {
+      if (!activeItermSessionId) {
+        watcherSendMessage("No active session. Use /s to list and /N to select.").catch(() => {});
+        return;
+      }
+      (async () => {
+        typeIntoSession(activeItermSessionId, "/clear");
+        await new Promise((r) => setTimeout(r, 1500));
+        typeIntoSession(activeItermSessionId, "go");
+        watcherSendMessage("Sent /clear + go").catch(() => {});
+      })().catch((err) => log(`/c: error — ${err}`));
+      return;
+    }
+
+    // --- /p — send "pause session" to active Claude session -----------------
+    if (trimmedText === "/p") {
+      if (!activeItermSessionId) {
+        watcherSendMessage("No active session. Use /s to list and /N to select.").catch(() => {});
+        return;
+      }
+      typeIntoSession(activeItermSessionId, "pause session");
+      watcherSendMessage("Sent \"pause session\"").catch(() => {});
       return;
     }
 
@@ -499,10 +576,10 @@ end tell`;
       }
     }
 
-    // --- /kill N (alias: /k N) — kill a stuck session (Claude or terminal) --
-    const killMatch = trimmedText.match(/^\/(?:kill|k)\s+(\d+)$/);
-    if (killMatch) {
-      const num = parseInt(killMatch[1], 10);
+    // --- /r N (alias: /restart N) — restart Claude in session N ---------------
+    const restartMatch = trimmedText.match(/^\/(?:restart|r)\s+(\d+)$/);
+    if (restartMatch) {
+      const num = parseInt(restartMatch[1], 10);
       const sessions = getSessionList();
       if (sessions.length === 0) {
         watcherSendMessage("No sessions found.").catch(() => {});
@@ -514,14 +591,32 @@ end tell`;
       }
       const target = sessions[num - 1];
       if (target.type === "terminal") {
-        handleKillTerminalSession(target).catch((err) => {
-          log(`/kill: unhandled error — ${err}`);
-        });
+        watcherSendMessage("Use /e to end terminal sessions.").catch(() => {});
       } else {
         handleKillSession(target).catch((err) => {
-          log(`/kill: unhandled error — ${err}`);
+          log(`/r: unhandled error — ${err}`);
         });
       }
+      return;
+    }
+
+    // --- /e N (alias: /end N) — end session (close tab + remove from registry) --
+    const endMatch = trimmedText.match(/^\/(?:end|e)\s+(\d+)$/);
+    if (endMatch) {
+      const num = parseInt(endMatch[1], 10);
+      const sessions = getSessionList();
+      if (sessions.length === 0) {
+        watcherSendMessage("No sessions found.").catch(() => {});
+        return;
+      }
+      if (num < 1 || num > sessions.length) {
+        watcherSendMessage(`Invalid session number. Use /s to list (1-${sessions.length}).`).catch(() => {});
+        return;
+      }
+      const target = sessions[num - 1];
+      handleEndSession(target).catch((err) => {
+        log(`/e: unhandled error — ${err}`);
+      });
       return;
     }
 

@@ -27,6 +27,8 @@ import {
   messageStore,
   sessionRegistry,
   clientQueues,
+  activeItermSessionId,
+  setActiveItermSessionId,
 } from "./state.js";
 import { log } from "./log.js";
 import type { RegisteredSession, VoiceConfig } from "./types.js";
@@ -226,12 +228,15 @@ export function saveStoreCache(): void {
 export function saveSessionRegistry(): void {
   try {
     mkdirSync(WHAZAA_DIR, { recursive: true });
-    const entries = Array.from(sessionRegistry.values()).map((s) => ({
-      sessionId: s.sessionId,
-      name: s.name,
-      itermSessionId: s.itermSessionId,
-    }));
-    writeFileSync(SESSION_REGISTRY_PATH, JSON.stringify(entries, null, 2), "utf-8");
+    const data = {
+      activeItermSessionId: activeItermSessionId || null,
+      sessions: Array.from(sessionRegistry.values()).map((s) => ({
+        sessionId: s.sessionId,
+        name: s.name,
+        itermSessionId: s.itermSessionId,
+      })),
+    };
+    writeFileSync(SESSION_REGISTRY_PATH, JSON.stringify(data, null, 2), "utf-8");
   } catch (err) {
     log(`Failed to save session registry: ${err}`);
   }
@@ -247,11 +252,12 @@ export function saveSessionRegistry(): void {
 export function loadSessionRegistry(): void {
   try {
     if (!existsSync(SESSION_REGISTRY_PATH)) return;
-    const raw = JSON.parse(readFileSync(SESSION_REGISTRY_PATH, "utf-8")) as Array<{
-      sessionId: string;
-      name: string;
-      itermSessionId?: string;
-    }>;
+    const parsed = JSON.parse(readFileSync(SESSION_REGISTRY_PATH, "utf-8"));
+
+    // Support both old format (plain array) and new format (object with sessions + activeItermSessionId)
+    const raw: Array<{ sessionId: string; name: string; itermSessionId?: string }> =
+      Array.isArray(parsed) ? parsed : (parsed.sessions ?? []);
+
     for (const entry of raw) {
       if (!entry.sessionId) continue;
       sessionRegistry.set(entry.sessionId, {
@@ -264,6 +270,13 @@ export function loadSessionRegistry(): void {
         clientQueues.set(entry.sessionId, []);
       }
     }
+
+    // Restore active session marker
+    if (!Array.isArray(parsed) && parsed.activeItermSessionId) {
+      setActiveItermSessionId(String(parsed.activeItermSessionId));
+      log(`Restored active iTerm session: ${parsed.activeItermSessionId}`);
+    }
+
     if (raw.length > 0) {
       log(`Restored ${raw.length} session(s) from disk`);
     }

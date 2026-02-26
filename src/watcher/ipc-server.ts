@@ -62,6 +62,8 @@ import {
   sessionRegistry,
   activeClientId,
   setActiveClientId,
+  activeItermSessionId,
+  setActiveItermSessionId,
   clientQueues,
   clientWaiters,
   contactMessageQueues,
@@ -94,8 +96,10 @@ import {
   setItermSessionVar,
   setItermTabName,
   deduplicateName,
+  getSessionList,
+  handleEndSession,
 } from "./iterm-sessions.js";
-import { isItermSessionAlive, runAppleScript, stripItermPrefix } from "./iterm-core.js";
+import { isItermSessionAlive, runAppleScript, stripItermPrefix, snapshotAllSessions } from "./iterm-core.js";
 import { log } from "./log.js";
 import type { IpcRequest, IpcResponse, QueuedMessage } from "./types.js";
 
@@ -214,6 +218,18 @@ function handleRegister(
   const name = params.name != null ? String(params.name) : "Unknown";
   const itermHint = params.itermSessionId != null ? String(params.itermSessionId) : undefined;
   const itermId = findItermSessionForTermId(sessionId, itermHint);
+
+  // Clean up any existing registry entries for this iTerm session to prevent
+  // duplicate names (e.g. from discovered-* entries created before real registration).
+  if (itermId) {
+    for (const [sid, entry] of sessionRegistry) {
+      if (sid !== sessionId && entry.itermSessionId === itermId) {
+        log(`IPC: removing stale entry ${sid} ("${entry.name}") — replaced by ${sessionId}`);
+        sessionRegistry.delete(sid);
+        clientQueues.delete(sid);
+      }
+    }
+  }
 
   // If this iTerm session has a persisted paiName (set by /N rename),
   // restore it — iTerm variables survive watcher restarts.
@@ -895,6 +911,111 @@ function handleVoiceConfig(
   socket.end();
 }
 
+// Resolve a session target by 1-based index or name substring.
+function resolveSessionTarget(
+  target: string
+): { id: string; name: string; path: string; type: "claude" | "terminal"; paiName: string | null; atPrompt: boolean } | null {
+  const sessions = getSessionList();
+  // Try as 1-based index
+  const num = parseInt(target, 10);
+  if (!isNaN(num) && num >= 1 && num <= sessions.length) {
+    return sessions[num - 1];
+  }
+  // Try as name substring (case-insensitive)
+  const lower = target.toLowerCase();
+  return sessions.find((s) => {
+    const label = s.paiName ?? s.name;
+    return label.toLowerCase().includes(lower);
+  }) ?? null;
+}
+
+// List all managed sessions with index, name, type, and active marker.
+function handleSessions(socket: Socket, id: string): void {
+  const allSessions = getSessionList();
+  const sessions = allSessions.map((s, i) => {
+    const regEntry = [...sessionRegistry.values()].find((e) => e.itermSessionId === s.id);
+    const label = s.paiName ?? (regEntry ? regEntry.name : null) ?? s.name;
+    return {
+      index: i + 1,
+      name: label,
+      type: s.type,
+      active: s.id === activeItermSessionId,
+    };
+  });
+  sendResponse(socket, { id, ok: true, result: { sessions } });
+  socket.end();
+}
+
+// Switch the active iTerm2 session by index or name substring.
+function handleSwitch(socket: Socket, id: string, params: Record<string, unknown>): void {
+  const target = params.target != null ? String(params.target) : "";
+  if (!target) {
+    sendResponse(socket, { id, ok: false, error: "target is required (session number or name)" });
+    socket.end();
+    return;
+  }
+  const session = resolveSessionTarget(target);
+  if (!session) {
+    sendResponse(socket, { id, ok: false, error: `No session matching "${target}". Use whatsapp_sessions to list.` });
+    socket.end();
+    return;
+  }
+
+  // Focus the session in iTerm2 using the same AppleScript pattern as the /N command
+  const escapedId = session.id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const focusScript = `tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${escapedId}" then
+          select aSession
+          return "focused"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not_found"
+end tell`;
+
+  const focusResult = runAppleScript(focusScript);
+  if (focusResult === "focused") {
+    setActiveItermSessionId(session.id);
+    const regEntry = [...sessionRegistry.values()].find((e) => e.itermSessionId === session.id);
+    if (regEntry) setActiveClientId(regEntry.sessionId);
+    const label = session.paiName ?? (regEntry ? regEntry.name : null) ?? session.name;
+    saveSessionRegistry();
+    sendResponse(socket, { id, ok: true, result: { switched: true, name: label } });
+  } else {
+    sendResponse(socket, { id, ok: false, error: "Session not found in iTerm2 — it may have closed." });
+  }
+  socket.end();
+}
+
+// End a session (close tab + cleanup) by index or name substring.
+async function handleEndSessionIpc(socket: Socket, id: string, params: Record<string, unknown>): Promise<void> {
+  const target = params.target != null ? String(params.target) : "";
+  if (!target) {
+    sendResponse(socket, { id, ok: false, error: "target is required (session number or name)" });
+    socket.end();
+    return;
+  }
+  const session = resolveSessionTarget(target);
+  if (!session) {
+    sendResponse(socket, { id, ok: false, error: `No session matching "${target}". Use whatsapp_sessions to list.` });
+    socket.end();
+    return;
+  }
+
+  try {
+    await handleEndSession(session);
+    sendResponse(socket, { id, ok: true, result: { ended: true, name: session.paiName ?? session.name } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendResponse(socket, { id, ok: false, error: msg });
+  }
+  socket.end();
+}
+
 /**
  * Prune dead sessions and scan iTerm2 for sessions with user.paiName.
  * Returns { alive, pruned, discovered } arrays of session names.
@@ -905,9 +1026,23 @@ export function discoverSessions(): { alive: string[]; pruned: string[]; discove
   const pruned: string[] = [];
   const discovered: string[] = [];
 
+  // Single AppleScript call to get all live session data (replaces
+  // N×isItermSessionAlive + separate paiName scan AppleScript).
+  const snapshot = snapshotAllSessions();
+  const liveIds = new Set(snapshot.map((s) => s.id));
+
+  // Safety: if snapshot returned 0 sessions but we have registered sessions
+  // with iTerm IDs, AppleScript may have failed (screen locked, iTerm not
+  // responding, brief startup race).  Skip pruning to avoid wiping the registry.
+  const hasRegisteredItermSessions = [...sessionRegistry.values()].some((e) => e.itermSessionId);
+  if (snapshot.length === 0 && (hasRegisteredItermSessions || managedSessions.size > 0)) {
+    log("discover: snapshot returned 0 sessions but registry is non-empty — skipping pruning (AppleScript may have failed)");
+    return { alive: [...sessionRegistry.values()].map((e) => e.name), pruned: [], discovered: [] };
+  }
+
   // Phase 1: Prune dead sessions from the registry
   for (const [sid, entry] of sessionRegistry) {
-    if (!entry.itermSessionId || isItermSessionAlive(entry.itermSessionId)) {
+    if (!entry.itermSessionId || liveIds.has(entry.itermSessionId)) {
       alive.push(entry.name);
     } else {
       pruned.push(entry.name);
@@ -923,55 +1058,31 @@ export function discoverSessions(): { alive: string[]; pruned: string[]; discove
 
   // Also prune dead entries from managedSessions
   for (const [msid, msEntry] of managedSessions) {
-    if (!isItermSessionAlive(msid)) {
+    if (!liveIds.has(msid)) {
       pruned.push(msEntry.name);
       managedSessions.delete(msid);
       log(`discover: pruned dead managed session ${msid} ("${msEntry.name}")`);
     }
   }
 
-  // Phase 2: Scan ALL iTerm2 sessions for user.paiName variable.
-  const scanScript = `tell application "iTerm2"
-  set output to ""
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        set sid to id of aSession
-        try
-          set pName to (variable named "user.paiName") of aSession
-          if pName is not "" and pName is not missing value then
-            set output to output & sid & (ASCII character 9) & pName & linefeed
-          end if
-        end try
-      end repeat
-    end repeat
-  end repeat
-  return output
-end tell`;
-  const scanResult = runAppleScript(scanScript);
-  if (scanResult) {
-    const knownItermIds = new Set(
-      [...sessionRegistry.values()]
-        .map((e) => e.itermSessionId)
-        .filter(Boolean)
-    );
-    for (const line of scanResult.split("\n").filter(Boolean)) {
-      const parts = line.split("\t");
-      if (parts.length < 2) continue;
-      const itermId = parts[0];
-      const paiName = parts[1];
-      if (knownItermIds.has(itermId)) continue;
-      const syntheticId = `discovered-${itermId}`;
-      const dedupedName = deduplicateName(paiName, syntheticId);
-      sessionRegistry.set(syntheticId, {
-        sessionId: syntheticId,
-        name: dedupedName,
-        itermSessionId: itermId,
-        registeredAt: Date.now(),
-      });
-      discovered.push(dedupedName);
-      log(`discover: found session ${itermId} ("${dedupedName}")`);
-    }
+  // Phase 2: Discover sessions with user.paiName from the snapshot
+  const knownItermIds = new Set(
+    [...sessionRegistry.values()]
+      .map((e) => e.itermSessionId)
+      .filter(Boolean)
+  );
+  for (const snap of snapshot) {
+    if (!snap.paiName || knownItermIds.has(snap.id)) continue;
+    const syntheticId = `discovered-${snap.id}`;
+    const dedupedName = deduplicateName(snap.paiName, syntheticId);
+    sessionRegistry.set(syntheticId, {
+      sessionId: syntheticId,
+      name: dedupedName,
+      itermSessionId: snap.id,
+      registeredAt: Date.now(),
+    });
+    discovered.push(dedupedName);
+    log(`discover: found session ${snap.id} ("${dedupedName}")`);
   }
 
   // Persist the updated registry after any mutations
@@ -1040,6 +1151,9 @@ async function handleRequest(
     case "speak":        return handleSpeak(socket, id, params);
     case "voice_config": return handleVoiceConfig(socket, id, params);
     case "discover":     return handleDiscover(socket, id);
+    case "sessions":     return handleSessions(socket, id);
+    case "switch":       return handleSwitch(socket, id, params);
+    case "end_session":  return handleEndSessionIpc(socket, id, params);
     default:
       sendResponse(socket, { id, ok: false, error: `Unknown method: ${method}` });
       socket.end();

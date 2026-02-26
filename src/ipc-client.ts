@@ -143,6 +143,20 @@ export interface DiscoverResult {
   discovered: string[];
 }
 
+export interface SessionListResult {
+  sessions: Array<{ index: number; name: string; type: string; active: boolean }>;
+}
+
+export interface SwitchResult {
+  switched: boolean;
+  name: string;
+}
+
+export interface EndSessionResult {
+  ended: boolean;
+  name: string;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -283,6 +297,21 @@ export class WatcherClient {
   async discover(): Promise<DiscoverResult> {
     const result = await this.call("discover", {});
     return result as unknown as DiscoverResult;
+  }
+
+  async sessions(): Promise<SessionListResult> {
+    const result = await this.call("sessions", {});
+    return result as unknown as SessionListResult;
+  }
+
+  async switchSession(target: string): Promise<SwitchResult> {
+    const result = await this.call("switch", { target });
+    return result as unknown as SwitchResult;
+  }
+
+  async endSession(target: string): Promise<EndSessionResult> {
+    const result = await this.call("end_session", { target });
+    return result as unknown as EndSessionResult;
   }
 
   // -------------------------------------------------------------------------

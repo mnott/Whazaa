@@ -26,7 +26,7 @@ export function runAppleScript(script: string): string | null {
   const result = spawnSync("osascript", [], {
     input: script,
     stdio: ["pipe", "pipe", "pipe"],
-    timeout: 10_000,
+    timeout: 4_000,
   });
   if (result.status !== 0) return null;
   return result.stdout?.toString().trim() ?? null;
@@ -278,4 +278,95 @@ export function isItermSessionAlive(sessionId: string): boolean {
     'return "gone"'
   );
   return runAppleScript(script) === "alive";
+}
+
+// ---------------------------------------------------------------------------
+// Screen lock detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if the macOS screen is locked via `ioreg`.
+ *
+ * When the screen is locked, AppleScript calls to iTerm2 hang or fail.
+ * Callers should skip iTerm2 interaction and avoid creating zombie sessions.
+ */
+export function isScreenLocked(): boolean {
+  try {
+    const result = spawnSync(
+      "sh",
+      ["-c", "ioreg -n Root -d1 -a | grep -c CGSSessionScreenIsLocked"],
+      { timeout: 3_000, encoding: "utf8" }
+    );
+    return parseInt((result.stdout ?? "0").trim(), 10) > 0;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Batched snapshot — all session data in a single AppleScript call
+// ---------------------------------------------------------------------------
+
+/**
+ * Data returned by `snapshotAllSessions` for each open iTerm2 session.
+ */
+export interface SessionSnapshot {
+  id: string;
+  name: string;
+  tty: string;
+  atPrompt: boolean;
+  paiName: string | null;
+}
+
+/**
+ * Collect id, name, tty, shell-prompt status, and `user.paiName` for every
+ * open iTerm2 session in a **single** AppleScript invocation.
+ *
+ * This replaces the pattern of calling `listClaudeSessions()` +
+ * N×`isItermSessionAlive()` + N×`getItermSessionVar()` +
+ * `isClaudeRunningInSession()` which could spawn 30-60+ synchronous
+ * sub-processes and block the event loop long enough to cause Baileys
+ * WebSocket timeouts (408 disconnects).
+ */
+export function snapshotAllSessions(): SessionSnapshot[] {
+  const script = `
+tell application "iTerm2"
+  set output to ""
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        set sessionId to id of aSession
+        set sessionName to name of aSession
+        set sessionTty to tty of aSession
+        set isAtPrompt to (is at shell prompt of aSession)
+        tell aSession
+          try
+            set paiName to (variable named "user.paiName")
+          on error
+            set paiName to ""
+          end try
+        end tell
+        set output to output & sessionId & (ASCII character 9) & sessionName & (ASCII character 9) & sessionTty & (ASCII character 9) & (isAtPrompt as text) & (ASCII character 9) & paiName & linefeed
+      end repeat
+    end repeat
+  end repeat
+  return output
+end tell`;
+
+  const result = runAppleScript(script);
+  if (!result) return [];
+
+  const sessions: SessionSnapshot[] = [];
+  for (const line of result.split("\n").filter(Boolean)) {
+    const parts = line.split("\t");
+    if (parts.length < 4) continue;
+    sessions.push({
+      id: parts[0],
+      name: parts[1],
+      tty: parts[2],
+      atPrompt: parts[3] === "true",
+      paiName: (parts[4] && parts[4] !== "missing value" && parts[4] !== "") ? parts[4] : null,
+    });
+  }
+  return sessions;
 }

@@ -36,6 +36,7 @@ import {
   sendKeystrokeToSession,
   stripItermPrefix,
   withSessionAppleScript,
+  snapshotAllSessions,
 } from "./iterm-core.js";
 import { log } from "./log.js";
 import {
@@ -43,8 +44,10 @@ import {
   managedSessions,
   activeItermSessionId,
   setActiveItermSessionId,
+  clientQueues,
 } from "./state.js";
 import { watcherSendMessage } from "./send.js";
+import { saveSessionRegistry } from "./persistence.js";
 
 // ---------------------------------------------------------------------------
 // Session variable helpers
@@ -635,62 +638,138 @@ end tell`;
 }
 
 /**
+ * Batch-resolve working directories for multiple sessions in a single
+ * `ps` + `lsof` pass, replacing the previous per-session `cwdFromTty`
+ * approach that spawned 2×N sub-processes.
+ *
+ * @returns A map from TTY device path (e.g. `/dev/ttys003`) to the
+ *   absolute working directory of the Claude process on that TTY.
+ */
+function batchResolveCwds(sessions: Array<{ tty: string }>): Map<string, string> {
+  const result = new Map<string, string>();
+  if (sessions.length === 0) return result;
+
+  const psResult = spawnSync("ps", ["-eo", "pid,tty,comm"], { timeout: 5000 });
+  if (psResult.status !== 0) return result;
+
+  const ttyShorts = new Set(sessions.map((s) => s.tty.replace("/dev/", "")));
+  const pids: string[] = [];
+  const pidToTty = new Map<string, string>();
+
+  for (const line of psResult.stdout.toString().split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.includes("claude")) continue;
+    const parts = trimmed.split(/\s+/);
+    if (parts.length >= 3 && ttyShorts.has(parts[1])) {
+      pids.push(parts[0]);
+      const originalTty = sessions.find((s) => s.tty.replace("/dev/", "") === parts[1])?.tty;
+      if (originalTty) pidToTty.set(parts[0], originalTty);
+    }
+  }
+
+  if (pids.length === 0) return result;
+
+  const lsofResult = spawnSync("lsof", ["-a", "-d", "cwd", "-p", pids.join(","), "-Fn"], { timeout: 10_000 });
+  if (lsofResult.status !== 0) return result;
+
+  let currentPid = "";
+  for (const l of lsofResult.stdout.toString().split("\n")) {
+    if (l.startsWith("p")) {
+      currentPid = l.slice(1);
+    } else if (l.startsWith("n/")) {
+      const tty = pidToTty.get(currentPid);
+      if (tty) result.set(tty, l.slice(1));
+    }
+  }
+
+  return result;
+}
+
+/**
  * Build the merged session list shown by the `/s` WhatsApp command.
  *
+ * Uses `snapshotAllSessions()` to collect all iTerm2 session data in a
+ * **single** AppleScript call, and `batchResolveCwds()` to resolve working
+ * directories in a single `ps` + `lsof` pass.  This replaces the previous
+ * approach that spawned 30-60+ synchronous sub-processes and blocked the
+ * event loop long enough to cause Baileys WebSocket timeouts.
+ *
  * Combines three sources in priority order:
- * 1. **Auto-detected Claude sessions** from `listClaudeSessions` — all iTerm2
- *    tabs whose name contains "Claude"/"claude".
+ * 1. **Auto-detected Claude sessions** — sessions whose tab name contains
+ *    "Claude"/"claude".
  * 2. **Registry sessions** from `sessionRegistry` that have an `itermSessionId`
- *    but whose tab name no longer matches "claude" (e.g. the user renamed the
- *    tab). These are merged in without an extra AppleScript call to keep the
- *    event loop unblocked.
+ *    but whose tab name no longer matches "claude".
  * 3. **Managed terminal sessions** from `managedSessions` — plain shell tabs
- *    opened via `/t`. Each entry is verified with `isItermSessionAlive`; stale
- *    entries (closed tabs) are pruned from the registry automatically.
+ *    opened via `/t`. Liveness is checked against the snapshot (zero extra
+ *    AppleScript calls).
  *
- * Terminal sessions that have since launched Claude (i.e. their UUID appears
- * in the Claude list) are removed from `managedSessions` to prevent
- * duplication.
- *
- * @returns A deduplicated array of session descriptors, each with:
- *   - `id` — the iTerm2 session UUID
- *   - `name` — the human-readable label
- *   - `path` — the working directory (may be `""` for registry/terminal sessions)
- *   - `type` — `"claude"` for Claude Code sessions, `"terminal"` for plain shells
+ * @returns A deduplicated array of session descriptors with `paiName` and
+ *   `atPrompt` fields so callers can avoid additional AppleScript calls.
  */
-export function getSessionList(): Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> {
-  const claudeSessions = listClaudeSessions().map((s) => ({ ...s, type: "claude" as const }));
+export function getSessionList(): Array<{
+  id: string; name: string; path: string;
+  type: "claude" | "terminal";
+  paiName: string | null; atPrompt: boolean;
+}> {
+  // Single AppleScript call replaces N×listClaudeSessions + N×isItermSessionAlive
+  // + N×getItermSessionVar + isClaudeRunningInSession
+  const snapshot = snapshotAllSessions();
+  const snapshotIds = new Set(snapshot.map((s) => s.id));
+
+  // Filter for Claude sessions (tab name contains "claude")
+  const claudeSnapshots = snapshot.filter((s) =>
+    s.name.toLowerCase().includes("claude")
+  );
+
+  // Skip cwd resolution here — paiName / registry name is preferred for display
+  // and batchResolveCwds (ps + lsof) adds noticeable latency.  Callers that
+  // need the working directory can resolve it on demand.
+  const claudeSessions = claudeSnapshots.map((s) => ({
+    id: s.id,
+    name: s.name,
+    path: "",
+    type: "claude" as const,
+    paiName: s.paiName,
+    atPrompt: s.atPrompt,
+  }));
+
   const seenIds = new Set(claudeSessions.map((s) => s.id));
 
-  // Merge registered MCP sessions that weren't found by tab-name scan
-  // (e.g. because the iTerm2 tab was renamed and no longer contains "Claude").
-  // Trust the registry — avoid extra synchronous AppleScript calls here
-  // since they block the event loop and can cause Baileys WebSocket timeouts.
+  // Merge registered MCP sessions not found by tab-name scan
   for (const [, entry] of sessionRegistry) {
     if (entry.itermSessionId && !seenIds.has(entry.itermSessionId)) {
+      const snap = snapshot.find((s) => s.id === entry.itermSessionId);
       claudeSessions.push({
         id: entry.itermSessionId,
         name: entry.name,
         path: "",
         type: "claude" as const,
+        paiName: snap?.paiName ?? null,
+        atPrompt: snap?.atPrompt ?? true,
       });
       seenIds.add(entry.itermSessionId);
     }
   }
 
-  const terminalSessions: Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> = [];
+  // Managed terminal sessions — check liveness from snapshot (zero AppleScript)
+  type SessionEntry = { id: string; name: string; path: string; type: "claude" | "terminal"; paiName: string | null; atPrompt: boolean };
+  const terminalSessions: SessionEntry[] = [];
   for (const [id, entry] of managedSessions) {
     if (seenIds.has(id)) {
-      // This terminal tab has since launched Claude — let Claude list pick it up,
-      // and remove from managedSessions to avoid duplication.
       managedSessions.delete(id);
       continue;
     }
-    if (isItermSessionAlive(id)) {
-      const paiName = getItermSessionVar(id);
-      terminalSessions.push({ id, name: paiName ?? entry.name, path: "", type: "terminal" });
+    if (snapshotIds.has(id)) {
+      const snap = snapshot.find((s) => s.id === id)!;
+      terminalSessions.push({
+        id,
+        name: snap.paiName ?? entry.name,
+        path: "",
+        type: "terminal",
+        paiName: snap.paiName,
+        atPrompt: snap.atPrompt,
+      });
     } else {
-      // Tab was closed — prune from registry
       managedSessions.delete(id);
     }
   }
@@ -871,4 +950,97 @@ end tell`;
   }
 
   await watcherSendMessage(`Closed terminal session *${target.name}*`).catch(() => {});
+}
+
+/**
+ * Handle the `/x N` (or `/end N`) WhatsApp command — truly end a session.
+ *
+ * Unlike `/k` which kills and restarts Claude, this command closes the iTerm2
+ * tab entirely and removes the session from all registries. Works for both
+ * Claude and terminal sessions.
+ *
+ * @param target - The session to end, as returned by `getSessionList`.
+ */
+export async function handleEndSession(
+  target: { id: string; name: string; path: string; type: "claude" | "terminal" }
+): Promise<void> {
+  const label = target.name;
+  await watcherSendMessage(`Ending session "${label}"...`).catch(() => {});
+  log(`/x: ending session ${target.id} ("${label}")`);
+
+  if (target.type === "claude") {
+    // Kill the Claude process before closing the tab
+    const ttyScript = `
+tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${target.id}" then
+          return tty of aSession
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`;
+    const tty = runAppleScript(ttyScript);
+    if (tty) {
+      const ttyShort = tty.replace("/dev/", "");
+      const psResult = spawnSync("ps", ["-eo", "pid,tty,comm"], { timeout: 5000 });
+      if (psResult.status === 0) {
+        for (const line of psResult.stdout.toString().split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed.includes(ttyShort) && trimmed.includes("claude")) {
+            const pid = trimmed.split(/\s+/)[0];
+            spawnSync("kill", ["-TERM", pid], { timeout: 5000 });
+            break;
+          }
+        }
+      }
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  } else {
+    sendKeystrokeToSession(target.id, 3);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  // Close the iTerm2 tab
+  const closeScript = `
+tell application "iTerm2"
+  repeat with aWindow in windows
+    repeat with aTab in tabs of aWindow
+      repeat with aSession in sessions of aTab
+        if id of aSession is "${target.id}" then
+          close aTab
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not_found"
+end tell`;
+  const closeResult = runAppleScript(closeScript);
+  if (closeResult !== "ok") {
+    log(`/x: could not close tab for session ${target.id} (result: ${closeResult})`);
+  }
+
+  // Remove from managedSessions
+  managedSessions.delete(target.id);
+
+  // Remove ALL registry entries pointing to this iTerm session
+  for (const [sid, entry] of sessionRegistry) {
+    if (entry.itermSessionId === target.id) {
+      sessionRegistry.delete(sid);
+      clientQueues.delete(sid);
+      log(`/x: removed registry entry ${sid} ("${entry.name}")`);
+    }
+  }
+
+  // Clear active session if this was it
+  if (activeItermSessionId === target.id) {
+    setActiveItermSessionId("");
+  }
+
+  saveSessionRegistry();
+  await watcherSendMessage(`Ended session *${label}*`).catch(() => {});
 }
