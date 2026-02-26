@@ -85,7 +85,7 @@ export function setActiveItermSessionId(id: string): void {
  * match the numbers they type.  Automatically invalidated 60 seconds after
  * capture to prevent stale routing.
  */
-export let cachedSessionList: Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> | null = null;
+export let cachedSessionList: Array<{ id: string; name: string; path: string; type: "claude" | "terminal"; paiName: string | null; atPrompt: boolean }> | null = null;
 
 /**
  * Unix epoch milliseconds at which `cachedSessionList` was populated.
@@ -100,7 +100,7 @@ export let cachedSessionListTime = 0;
  * @param time  The capture timestamp in Unix epoch milliseconds.
  */
 export function setCachedSessionList(
-  list: Array<{ id: string; name: string; path: string; type: "claude" | "terminal" }> | null,
+  list: Array<{ id: string; name: string; path: string; type: "claude" | "terminal"; paiName: string | null; atPrompt: boolean }> | null,
   time: number
 ): void {
   cachedSessionList = list;

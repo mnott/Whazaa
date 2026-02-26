@@ -53,7 +53,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { watch } from "./watcher/index.js";
 import { setup, uninstall } from "./setup.js";
-import { WatcherClient, ChatsResult, DiscoverResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult } from "./ipc-client.js";
+import { WatcherClient, ChatsResult, DiscoverResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult, SessionListResult, SwitchResult, EndSessionResult } from "./ipc-client.js";
 import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
@@ -798,6 +798,68 @@ server.registerTool("whatsapp_discover", {
     }
   }
 );
+
+server.registerTool("whatsapp_sessions", {
+  description: [
+    "List all iTerm2 sessions managed by the Whazaa watcher.",
+    "Shows session index, name, type (claude/terminal), and active marker.",
+    "Use the index or name with whatsapp_switch or whatsapp_end_session.",
+  ].join(" "),
+  inputSchema: {},
+}, async () => {
+  try {
+    const result: SessionListResult = await watcher.sessions();
+    if (result.sessions.length === 0) {
+      return { content: [{ type: "text", text: "No sessions found." }] };
+    }
+    const lines = result.sessions.map((s) =>
+      `${s.index}. ${s.name}${s.type === "terminal" ? " [terminal]" : ""}${s.active ? " <- active" : ""}`
+    );
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  } catch (err) {
+    return errorResponse(err);
+  }
+});
+
+server.registerTool("whatsapp_switch", {
+  description: [
+    "Switch the active iTerm2 session that receives WhatsApp messages.",
+    "Accepts a session number (from whatsapp_sessions) or a name substring.",
+    "The target session is focused in iTerm2 and set as active.",
+  ].join(" "),
+  inputSchema: {
+    target: z.string().min(1).describe("Session number (1-based) or name substring to match"),
+  },
+}, async ({ target }) => {
+  try {
+    const result: SwitchResult = await watcher.switchSession(target);
+    return {
+      content: [{ type: "text", text: `Switched to *${result.name}*` }],
+    };
+  } catch (err) {
+    return errorResponse(err);
+  }
+});
+
+server.registerTool("whatsapp_end_session", {
+  description: [
+    "End an iTerm2 session — closes the tab and removes it from the session registry.",
+    "Accepts a session number (from whatsapp_sessions) or a name substring.",
+    "For Claude sessions, kills the process before closing. Cannot be undone.",
+  ].join(" "),
+  inputSchema: {
+    target: z.string().min(1).describe("Session number (1-based) or name substring to match"),
+  },
+}, async ({ target }) => {
+  try {
+    const result: EndSessionResult = await watcher.endSession(target);
+    return {
+      content: [{ type: "text", text: `Ended session *${result.name}*` }],
+    };
+  } catch (err) {
+    return errorResponse(err);
+  }
+});
 
 /**
  * Entry point. Dispatches to setup, uninstall, watch, or MCP server mode
