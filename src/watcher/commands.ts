@@ -338,13 +338,25 @@ export function createMessageHandler(
         return;
       }
 
-      // If no active session tracked yet, auto-discover from live Claude sessions.
-      // Uses pre-fetched atPrompt from the batched snapshot (no extra AppleScript).
+      // Validate activeItermSessionId — if it points to a session not in the
+      // live list, clear it so auto-discovery can pick a valid one.
+      if (activeItermSessionId && !allSessionIds.has(activeItermSessionId)) {
+        log(`/s: activeItermSessionId ${activeItermSessionId.slice(0, 8)}… not in live sessions — clearing`);
+        setActiveItermSessionId("");
+      }
+
+      // Auto-discover an active session if none is set (or was just cleared).
+      // Prefer a session where Claude is actively working (!atPrompt), but
+      // fall back to any Claude session — a session at the prompt is still
+      // a valid target for message delivery.
       if (!activeItermSessionId && allSessions.length > 0) {
-        const firstClaude = allSessions.find((s) => s.type === "claude" && !s.atPrompt);
-        if (firstClaude) {
-          setActiveSessionId(firstClaude.id);
-          setActiveItermSessionId(firstClaude.id);
+        const busy = allSessions.find((s) => s.type === "claude" && !s.atPrompt);
+        const anyClaudeSession = allSessions.find((s) => s.type === "claude");
+        const pick = busy ?? anyClaudeSession ?? allSessions[0];
+        if (pick) {
+          setActiveSessionId(pick.id);
+          setActiveItermSessionId(pick.id);
+          log(`/s: auto-selected active session: ${pick.name} (${pick.id.slice(0, 8)}…)`);
         }
       }
 
