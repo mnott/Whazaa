@@ -50,6 +50,7 @@ import { IPC_SOCKET_PATH } from "../ipc-client.js";
 import {
   activeItermSessionId,
   setActiveItermSessionId,
+  setCommandHandler,
 } from "./state.js";
 import { connectWatcher } from "./baileys.js";
 import { startIpcServer, discoverSessions } from "./ipc-server.js";
@@ -107,6 +108,10 @@ export async function watch(rawSessionId?: string): Promise<void> {
     () => consecutiveFailures,
     (n: number) => { consecutiveFailures = n; },
   );
+
+  // Store the handler so the IPC server can execute commands directly
+  // (e.g. whatsapp_command MCP tool calling /c without round-tripping through WhatsApp)
+  setCommandHandler(handleMessage);
 
   // Connect to WhatsApp directly (watcher is always the sole connection owner)
   console.log(`Connecting to WhatsApp...\n`);

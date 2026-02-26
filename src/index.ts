@@ -53,7 +53,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { watch } from "./watcher/index.js";
 import { setup, uninstall } from "./setup.js";
-import { WatcherClient, ChatsResult, DiscoverResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult, SessionListResult, SwitchResult, EndSessionResult } from "./ipc-client.js";
+import { WatcherClient, ChatsResult, CommandResult, DiscoverResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult, SessionListResult, SwitchResult, EndSessionResult } from "./ipc-client.js";
 import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
@@ -890,6 +890,32 @@ server.registerTool("whatsapp_end_session", {
     const result: EndSessionResult = await watcher.endSession(target);
     return {
       content: [{ type: "text", text: `Ended session *${result.name}*` }],
+    };
+  } catch (err) {
+    return errorResponse(err);
+  }
+});
+
+server.registerTool("whatsapp_command", {
+  description: [
+    "Execute a watcher slash command directly, bypassing WhatsApp.",
+    "The command is handled exactly as if it arrived from WhatsApp —",
+    "same handler, same side-effects — but without the WhatsApp round-trip.",
+    "Use this when Claude needs to trigger watcher commands like /c (clear context + resume),",
+    "/s (list sessions), /ss (screenshot), /p (paste clipboard), /cc (cancel), etc.",
+    "The command fires asynchronously; results are sent back to WhatsApp by the watcher.",
+  ].join(" "),
+  inputSchema: {
+    command: z
+      .string()
+      .min(1)
+      .describe("The slash command to execute (e.g. '/c', '/s', '/ss', '/p', '/restart')"),
+  },
+}, async ({ command }) => {
+  try {
+    const result: CommandResult = await watcher.command(command);
+    return {
+      content: [{ type: "text", text: `Executed: ${result.command}` }],
     };
   } catch (err) {
     return errorResponse(err);
