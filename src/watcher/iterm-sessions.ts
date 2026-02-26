@@ -770,14 +770,39 @@ export function getSessionList(): Array<{
   // Refresh the PTY cache so the locked-screen fallback has fresh TTY paths
   updateSessionTtyCache(snapshot);
 
-  // Filter for Claude sessions (tab name contains "claude")
+  // Determine which TTYs actually have a Claude/node process running.
+  // A single `ps` call checks all TTYs at once — fast and avoids per-session AppleScript.
+  // After `pkill claude`, tabs stay open but Claude is gone — this filters them out.
+  const claudeTtys = new Set<string>();
+  try {
+    const psResult = spawnSync("ps", ["-eo", "tty,comm"], {
+      timeout: 3_000,
+      encoding: "utf8",
+    });
+    if (psResult.status === 0 && psResult.stdout) {
+      for (const line of psResult.stdout.split("\n")) {
+        if (/\bclaude\b/.test(line) || /\bnode\b/.test(line)) {
+          const tty = line.trim().split(/\s+/)[0];
+          if (tty && tty !== "??") claudeTtys.add(`/dev/${tty}`);
+        }
+      }
+    }
+  } catch { /* ps failure is non-fatal — fall back to showing all sessions */ }
+
+  /**
+   * Check if a snapshot entry has Claude running on its TTY.
+   * Falls back to true if we have no TTY info (conservative — show it).
+   */
+  function hasClaudeProcess(snap: { tty: string }): boolean {
+    if (!snap.tty || claudeTtys.size === 0) return true; // no data → assume alive
+    return claudeTtys.has(snap.tty);
+  }
+
+  // Filter for Claude sessions: tab name contains "claude" AND claude is running
   const claudeSnapshots = snapshot.filter((s) =>
-    s.name.toLowerCase().includes("claude")
+    s.name.toLowerCase().includes("claude") && hasClaudeProcess(s)
   );
 
-  // Skip cwd resolution here — paiName / registry name is preferred for display
-  // and batchResolveCwds (ps + lsof) adds noticeable latency.  Callers that
-  // need the working directory can resolve it on demand.
   const claudeSessions = claudeSnapshots.map((s) => ({
     id: s.id,
     name: s.name,
@@ -790,11 +815,11 @@ export function getSessionList(): Array<{
   const seenIds = new Set(claudeSessions.map((s) => s.id));
 
   // Merge registered MCP sessions not found by tab-name scan.
-  // Only include entries whose iTerm2 session is still alive in the snapshot —
-  // otherwise dead registry entries become ghosts that /s shows but /N can't find.
+  // Only include entries whose iTerm2 session is alive AND has Claude running.
   for (const [, entry] of sessionRegistry) {
     if (entry.itermSessionId && !seenIds.has(entry.itermSessionId) && snapshotIds.has(entry.itermSessionId)) {
       const snap = snapshot.find((s) => s.id === entry.itermSessionId)!;
+      if (!hasClaudeProcess(snap)) continue;
       claudeSessions.push({
         id: entry.itermSessionId,
         name: entry.name,
