@@ -502,15 +502,12 @@ end tell`;
         watcherSendMessage("No active session. Use /s to list and /N to select.").catch(() => {});
         return;
       }
-      // Return the promise so the IPC server can hold the MCP response
-      // until the full sequence completes.  This prevents Claude from
-      // generating text between the MCP response and the Ctrl+C.
-      return (async () => {
+      (async () => {
         const sid = activeItermSessionId;
-        // Ctrl+C interrupts any ongoing Claude generation so /clear lands
-        // on a clean prompt.
-        sendKeystrokeToSession(sid, 3); // ASCII 3 = Ctrl+C / ETX
-        await new Promise((r) => setTimeout(r, 2000));
+        // Wait for the MCP tool response to return to Claude and for Claude
+        // to finish any brief text generation.  10s is generous enough for
+        // the MCP round-trip plus a short response.
+        await new Promise((r) => setTimeout(r, 10000));
         typeIntoSession(sid, "/clear");
         // /clear can take 5-10s+ (context compression, hook scripts, etc.).
         // Paste "go" first without Enter, then send Enter after a second
@@ -522,6 +519,7 @@ end tell`;
         sendKeystrokeToSession(sid, 13);
         watcherSendMessage("Sent /clear + go").catch(() => {});
       })().catch((err) => log(`/c: error — ${err}`));
+      return;
     }
 
     // --- /p — send "pause session" to active Claude session -----------------

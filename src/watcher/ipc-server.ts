@@ -1118,25 +1118,11 @@ function handleCommand(
   }
 
   try {
-    // The command handler may return a Promise for async commands (e.g. /c
-    // which needs to wait for Ctrl+C → /clear → go to complete).  If so,
-    // hold the IPC response until the promise settles so the MCP caller
-    // doesn't generate text while the sequence is still in flight.
-    const result = commandHandler(text, Date.now());
-    if (result && typeof (result as Promise<void>).then === "function") {
-      (result as Promise<void>).then(
-        () => {
-          sendResponse(socket, { id, ok: true, result: { executed: true, command: text } });
-          socket.end();
-        },
-        (err) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          sendResponse(socket, { id, ok: false, error: msg });
-          socket.end();
-        },
-      );
-      return; // socket stays open until promise settles
-    }
+    // Fire-and-forget: the handler may launch async work (e.g. /c with its
+    // Ctrl+C → /clear → go sequence) but we respond immediately.  Holding
+    // the response would keep Claude in "waiting for tool" state, and any
+    // Ctrl+C sent during that state cancels the MCP call itself.
+    commandHandler(text, Date.now());
     sendResponse(socket, { id, ok: true, result: { executed: true, command: text } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
