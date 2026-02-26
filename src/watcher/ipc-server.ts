@@ -1118,10 +1118,25 @@ function handleCommand(
   }
 
   try {
-    // Fire-and-forget: handleMessage is sync but commands within it may use
-    // async AppleScript calls and setTimeout delays (e.g. /c waits 4s).
-    // We respond immediately — the command outcome is reported via WhatsApp.
-    commandHandler(text, Date.now());
+    // The command handler may return a Promise for async commands (e.g. /c
+    // which needs to wait for Ctrl+C → /clear → go to complete).  If so,
+    // hold the IPC response until the promise settles so the MCP caller
+    // doesn't generate text while the sequence is still in flight.
+    const result = commandHandler(text, Date.now());
+    if (result && typeof (result as Promise<void>).then === "function") {
+      (result as Promise<void>).then(
+        () => {
+          sendResponse(socket, { id, ok: true, result: { executed: true, command: text } });
+          socket.end();
+        },
+        (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          sendResponse(socket, { id, ok: false, error: msg });
+          socket.end();
+        },
+      );
+      return; // socket stays open until promise settles
+    }
     sendResponse(socket, { id, ok: true, result: { executed: true, command: text } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

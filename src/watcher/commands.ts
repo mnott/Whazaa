@@ -125,7 +125,7 @@ export function createMessageHandler(
   setActiveSessionId: (id: string) => void,
   getConsecutiveFailures: () => number,
   setConsecutiveFailures: (n: number) => void,
-): (text: string, timestamp: number) => void {
+): (text: string, timestamp: number) => void | Promise<void> {
 
   /**
    * Deliver a plain text message to the active iTerm2 session.
@@ -263,7 +263,7 @@ export function createMessageHandler(
    * @param timestamp - The message timestamp in milliseconds since epoch, as
    *   provided by Baileys (used for queue ordering in IPC dispatch).
    */
-  return function handleMessage(text: string, timestamp: number): void {
+  return function handleMessage(text: string, timestamp: number): void | Promise<void> {
     const trimmedText = text.trim();
 
     // --- /h, /help — show available commands --------------------------------
@@ -502,12 +502,13 @@ end tell`;
         watcherSendMessage("No active session. Use /s to list and /N to select.").catch(() => {});
         return;
       }
-      (async () => {
+      // Return the promise so the IPC server can hold the MCP response
+      // until the full sequence completes.  This prevents Claude from
+      // generating text between the MCP response and the Ctrl+C.
+      return (async () => {
         const sid = activeItermSessionId;
-        // Send Ctrl+C first to interrupt any ongoing Claude generation.
-        // Without this, Claude may still be outputting text when /clear
-        // arrives (especially when /c is invoked via MCP from the same
-        // session that's about to be cleared).
+        // Ctrl+C interrupts any ongoing Claude generation so /clear lands
+        // on a clean prompt.
         sendKeystrokeToSession(sid, 3); // ASCII 3 = Ctrl+C / ETX
         await new Promise((r) => setTimeout(r, 2000));
         typeIntoSession(sid, "/clear");
@@ -521,7 +522,6 @@ end tell`;
         sendKeystrokeToSession(sid, 13);
         watcherSendMessage("Sent /clear + go").catch(() => {});
       })().catch((err) => log(`/c: error — ${err}`));
-      return;
     }
 
     // --- /p — send "pause session" to active Claude session -----------------
