@@ -57,6 +57,7 @@ let status: WhatsAppStatus = {
 /** Reconnect scheduling */
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
+let connectionReplacedCount = 0;
 const MAX_RECONNECT_DELAY_MS = 60_000;
 
 /** Set to true on loggedOut — stops all reconnect attempts */
@@ -156,6 +157,7 @@ async function connect(): Promise<void> {
       status.awaitingQR = false;
       status.connected = true;
       reconnectAttempts = 0;
+      connectionReplacedCount = 0;
 
       const jid = sock?.user?.id ?? null;
       if (jid) {
@@ -205,6 +207,22 @@ async function connect(): Promise<void> {
           initResolve();
           initResolve = null;
         }
+        return;
+      }
+
+      if (statusCode === DisconnectReason.connectionReplaced) {
+        connectionReplacedCount++;
+        if (connectionReplacedCount >= 3) {
+          process.stderr.write(
+            "[whazaa] Connection replaced (440) 3 times — another instance holds the session. Stopping.\n"
+          );
+          return;
+        }
+        process.stderr.write(
+          `[whazaa] Connection replaced (440) by another instance (${connectionReplacedCount}/3). Retrying with longer backoff...\n`
+        );
+        reconnectAttempts = Math.max(reconnectAttempts, 4);
+        scheduleReconnect();
         return;
       }
 

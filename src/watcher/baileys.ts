@@ -112,6 +112,7 @@ export async function connectWatcher(
   let sock: ReturnType<typeof makeWASocket> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
+  let connectionReplacedCount = 0;
   let permanentlyLoggedOut = false;
   let stopped = false;
 
@@ -289,6 +290,7 @@ export async function connectWatcher(
         watcherStatus.connected = true;
         connStatus.connected = true;
         reconnectAttempts = 0;
+        connectionReplacedCount = 0;
 
         const jid = sock?.user?.id ?? null;
         if (jid) {
@@ -327,6 +329,26 @@ export async function connectWatcher(
         if (statusCode === DisconnectReason.loggedOut) {
           permanentlyLoggedOut = true;
           log("Logged out (401). Run 'npx whazaa setup' to re-pair.");
+          return;
+        }
+
+        if (statusCode === DisconnectReason.connectionReplaced) {
+          connectionReplacedCount++;
+          if (connectionReplacedCount >= 3) {
+            log(
+              "Connection replaced (440) 3 times — another instance holds the session. " +
+              "Stopping reconnection. Use whatsapp_restart to recover."
+            );
+            return;
+          }
+          if (!stopped) {
+            log(
+              `Connection replaced (440) by another instance (${connectionReplacedCount}/3). ` +
+              "Retrying with longer backoff..."
+            );
+            reconnectAttempts = Math.max(reconnectAttempts, 4); // at least 16s
+            scheduleReconnect();
+          }
           return;
         }
 
@@ -480,6 +502,7 @@ export async function connectWatcher(
   async function triggerLogin(): Promise<void> {
     permanentlyLoggedOut = false;
     reconnectAttempts = 0;
+    connectionReplacedCount = 0;
 
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
