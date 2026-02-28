@@ -379,6 +379,7 @@ async function handleSendFile(
   const ext = fileName.includes(".") ? "." + fileName.split(".").pop()!.toLowerCase() : "";
   const TEXT_EXTS = new Set([".md", ".txt", ".csv", ".json", ".log", ".xml", ".yaml", ".yml"]);
 
+  // Prettify mode for text files: convert to WhatsApp-formatted text messages (inline)
   if (prettify && TEXT_EXTS.has(ext)) {
     try {
       const raw = readFileSync(filePath, "utf-8");
@@ -392,7 +393,6 @@ async function handleSendFile(
       }
 
       stopTypingIndicator();
-      // Send caption first if provided
       if (fileCaption) {
         const captionText = "\uFEFF" + markdownToWhatsApp(fileCaption);
         const r = await watcherSock!.sendMessage(targetJidFile, { text: captionText });
