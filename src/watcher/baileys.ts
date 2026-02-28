@@ -57,7 +57,7 @@ import {
 import { loadStoreCache, saveStoreCache } from "./persistence.js";
 import { stopTypingIndicator } from "./typing.js";
 import { trackContact } from "./contacts.js";
-import { downloadImageToTemp, downloadAudioAndTranscribe } from "./media.js";
+import { downloadImageToTemp, downloadAudioAndTranscribe, downloadDocumentToDownloads } from "./media.js";
 import { log } from "./log.js";
 import type { WatcherConnStatus } from "./types.js";
 
@@ -394,7 +394,12 @@ export async function connectWatcher(
         // Detect audio/voice note messages — these have no text body
         const isAudio = !body && msg.message?.audioMessage != null;
 
-        if (!body && !isImage && !isAudio) continue;
+        // Detect document or video messages — files sent via WhatsApp
+        const isDocument =
+          !body && !isImage && !isAudio &&
+          (msg.message?.documentMessage != null || msg.message?.videoMessage != null);
+
+        if (!body && !isImage && !isAudio && !isDocument) continue;
         if (!remoteJid) continue;
 
         const remoteJidNorm = stripDevice(remoteJid);
@@ -447,6 +452,19 @@ export async function connectWatcher(
                 log(`Audio delivery error: ${err}`);
               });
             }
+          } else if (isDocument) {
+            // Download document/video to ~/Downloads, deliver path to iTerm2
+            const sockRef = sock;
+            if (sockRef) {
+              downloadDocumentToDownloads(msg, sockRef).then((result) => {
+                if (!result) return;
+                const parts = [`[File]: ${result.path}`];
+                if (result.caption) parts.push(result.caption);
+                onMessage(parts.join(" "), msgId, timestamp);
+              }).catch((err) => {
+                log(`Document delivery error: ${err}`);
+              });
+            }
           } else {
             // Existing behaviour: deliver to iTerm2 and MCP client queue
             onMessage(body!, msgId, timestamp);
@@ -478,6 +496,19 @@ export async function connectWatcher(
               });
             } else {
               log(`Incoming audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (no sock, skipping transcription)`);
+            }
+          } else if (isDocument) {
+            const sockRef = sock;
+            if (sockRef) {
+              downloadDocumentToDownloads(msg, sockRef).then((result) => {
+                if (!result) return;
+                const parts = [`[File]: ${result.path}`];
+                if (result.caption) parts.push(result.caption);
+                enqueueContactMessage(remoteJidNorm, parts.join(" "), timestamp);
+                log(`Document from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${result.fileName}`);
+              }).catch((err) => {
+                log(`Non-self document download error: ${err}`);
+              });
             }
           } else {
             log(`Incoming image from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (not forwarded to iTerm2)`);

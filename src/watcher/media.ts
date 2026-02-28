@@ -23,8 +23,8 @@
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { promisify } from "node:util";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpdir, homedir } from "node:os";
+import { join, extname, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 
@@ -80,6 +80,91 @@ export async function downloadImageToTemp(
     return filePath;
   } catch (err) {
     log(`Image download failed: ${err}`);
+    return null;
+  }
+}
+
+/**
+ * Map a generic MIME type to a file extension (for documents, videos, etc.).
+ */
+function mimetypeToDocExt(mimetype: string | null | undefined): string {
+  if (!mimetype) return "bin";
+  if (mimetype.includes("pdf")) return "pdf";
+  if (mimetype.includes("word") || mimetype.includes("docx")) return "docx";
+  if (mimetype.includes("msword")) return "doc";
+  if (mimetype.includes("spreadsheet") || mimetype.includes("xlsx")) return "xlsx";
+  if (mimetype.includes("ms-excel")) return "xls";
+  if (mimetype.includes("presentation") || mimetype.includes("pptx")) return "pptx";
+  if (mimetype.includes("ms-powerpoint")) return "ppt";
+  if (mimetype.includes("zip")) return "zip";
+  if (mimetype.includes("text/plain")) return "txt";
+  if (mimetype.includes("text/csv")) return "csv";
+  if (mimetype.includes("json")) return "json";
+  if (mimetype.includes("mp4")) return "mp4";
+  if (mimetype.includes("webm")) return "webm";
+  if (mimetype.includes("3gpp")) return "3gp";
+  return "bin";
+}
+
+/**
+ * Generate a unique filename in a directory, appending (1), (2), etc. if needed.
+ */
+function deduplicateName(dir: string, name: string): string {
+  let candidate = join(dir, name);
+  if (!existsSync(candidate)) return candidate;
+
+  const ext = extname(name);
+  const base = basename(name, ext);
+  let i = 1;
+  do {
+    candidate = join(dir, `${base} (${i})${ext}`);
+    i++;
+  } while (existsSync(candidate));
+  return candidate;
+}
+
+/**
+ * Download a document (or video) message to ~/Downloads with its original filename.
+ * Deduplicates by appending (1), (2), etc. if the file already exists.
+ * Returns the absolute path to the saved file, or null on failure.
+ */
+export async function downloadDocumentToDownloads(
+  msg: proto.IWebMessageInfo,
+  sock: ReturnType<typeof makeWASocket>
+): Promise<{ path: string; fileName: string; caption: string | null } | null> {
+  try {
+    const docMsg = msg.message?.documentMessage ?? null;
+    const vidMsg = msg.message?.videoMessage ?? null;
+    const mediaMsg = docMsg ?? vidMsg;
+    if (!mediaMsg) return null;
+
+    const mimetype = mediaMsg.mimetype ?? null;
+    const originalName = docMsg?.fileName ?? null;
+    const caption = docMsg?.caption ?? vidMsg?.caption ?? null;
+
+    // Use original filename if available, otherwise generate one
+    const fileName = originalName
+      ? originalName
+      : `whazaa-file-${Date.now()}.${mimetypeToDocExt(mimetype)}`;
+
+    const downloadsDir = join(homedir(), "Downloads");
+    const filePath = deduplicateName(downloadsDir, fileName);
+
+    const buffer = await downloadMediaMessage(
+      msg as Parameters<typeof downloadMediaMessage>[0],
+      "buffer",
+      {},
+      {
+        logger: pino({ level: "silent" }),
+        reuploadRequest: sock.updateMediaMessage,
+      }
+    );
+
+    writeFileSync(filePath, buffer as Buffer);
+    log(`Document saved to ${filePath}`);
+    return { path: filePath, fileName: basename(filePath), caption };
+  } catch (err) {
+    log(`Document download failed: ${err}`);
     return null;
   }
 }

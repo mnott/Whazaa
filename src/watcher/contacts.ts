@@ -177,23 +177,41 @@ export function trackContact(jid: string, name: string | null, timestamp: number
  *
  * WhatsApp uses a different set of delimiters from standard Markdown:
  *
- * | Markdown        | WhatsApp  |
- * |-----------------|-----------|
- * | `**bold**`      | `*bold*`  |
- * | `*italic*`      | `_italic_`|
- * | `` `code` ``    | ` ```code``` ` |
+ * | Markdown              | WhatsApp          |
+ * |-----------------------|-------------------|
+ * | `**bold**`            | `*bold*`          |
+ * | `*italic*`            | `_italic_`        |
+ * | `` `code` ``          | ` ```code``` `    |
+ * | `# Heading`           | `*HEADING*`       |
+ * | `> blockquote`        | `▎ text`          |
+ * | `---`                 | `———`             |
+ * | `- [ ] / - [x]`       | `☐ / ☑`          |
+ * | `- item`              | `• item`          |
  *
- * The conversion is applied in order (bold before italic) to avoid
- * accidentally re-processing substituted delimiters.  Block-level Markdown
- * (headings, lists, horizontal rules) is not converted and will appear as
- * plain text in WhatsApp.
+ * The conversion is applied in order: block-level elements first (headings,
+ * rules, blockquotes, lists), then inline formatting (bold before italic)
+ * to avoid accidentally re-processing substituted delimiters.
  *
  * @param text  Input text that may contain Markdown formatting.
  * @returns     Text with WhatsApp-compatible formatting codes substituted in.
  */
 export function markdownToWhatsApp(text: string): string {
   return text
+    // Block-level: headings → bold uppercase
+    .replace(/^#{1,6}\s+(.+)$/gm, (_m, title: string) => `*${title.toUpperCase()}*`)
+    // Block-level: horizontal rules → em dashes
+    .replace(/^---+$/gm, "———")
+    // Block-level: blockquotes → left bar
+    .replace(/^>\s?(.*)$/gm, "▎ $1")
+    // Block-level: checkboxes
+    .replace(/^(\s*)- \[x\]\s+/gm, "$1☑ ")
+    .replace(/^(\s*)- \[ \]\s+/gm, "$1☐ ")
+    // Block-level: unordered list items → bullet
+    .replace(/^(\s*)[-*]\s+/gm, "$1• ")
+    // Inline: bold **text** → *text*
     .replace(/\*\*(.+?)\*\*/gs, "*$1*")
+    // Inline: italic *text* → _text_ (only single asterisks not adjacent to other asterisks)
     .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/gs, "_$1_")
+    // Inline: code `text` → ```text```
     .replace(/`([^`]+)`/g, "```$1```");
 }
