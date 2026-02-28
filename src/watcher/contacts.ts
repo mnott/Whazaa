@@ -196,9 +196,10 @@ export function trackContact(jid: string, name: string | null, timestamp: number
  * @returns     Text with WhatsApp-compatible formatting codes substituted in.
  */
 export function markdownToWhatsApp(text: string): string {
+  const BOLD = "\x01"; // temp placeholder to protect WhatsApp bold from italic pass
   return text
-    // Block-level: headings → bold uppercase
-    .replace(/^#{1,6}\s+(.+)$/gm, (_m, title: string) => `*${title.toUpperCase()}*`)
+    // Block-level: headings → bold uppercase (placeholder-wrapped)
+    .replace(/^#{1,6}\s+(.+)$/gm, (_m, title: string) => `${BOLD}${title.toUpperCase()}${BOLD}`)
     // Block-level: horizontal rules → em dashes
     .replace(/^---+$/gm, "———")
     // Block-level: blockquotes → left bar
@@ -208,10 +209,12 @@ export function markdownToWhatsApp(text: string): string {
     .replace(/^(\s*)- \[ \]\s+/gm, "$1☐ ")
     // Block-level: unordered list items → bullet
     .replace(/^(\s*)[-*]\s+/gm, "$1• ")
-    // Inline: bold **text** → *text*
-    .replace(/\*\*(.+?)\*\*/gs, "*$1*")
+    // Inline: bold **text** → placeholder-wrapped
+    .replace(/\*\*(.+?)\*\*/gs, `${BOLD}$1${BOLD}`)
     // Inline: italic *text* → _text_ (only single asterisks not adjacent to other asterisks)
     .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/gs, "_$1_")
     // Inline: code `text` → ```text```
-    .replace(/`([^`]+)`/g, "```$1```");
+    .replace(/`([^`]+)`/g, "```$1```")
+    // Replace bold placeholders with WhatsApp bold
+    .replace(new RegExp(BOLD, "g"), "*");
 }
