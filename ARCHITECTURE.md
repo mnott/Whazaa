@@ -451,7 +451,7 @@ Pattern: `/1`, `/2`, `/3`, ...
 
 `npx whazaa setup` runs through `index.ts → setup()` using `whatsapp.ts` (not the watcher):
 
-1. Write/update `~/.claude/.mcp.json` with the whazaa entry
+1. Write/update `~/.claude.json` with the whazaa entry
 2. If `~/.whazaa/auth/creds.json` exists, attempt a verification connection with a 10-second timeout. Race: connected / logout / QR / timeout
 3. If already connected: exit successfully
 4. If stale credentials: delete auth dir, fall through to pairing

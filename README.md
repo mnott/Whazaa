@@ -54,7 +54,7 @@ npx -y whazaa setup
 ```
 
 This will:
-1. Add Whazaa to `~/.claude/.mcp.json`
+1. Add Whazaa to `~/.claude.json`
 2. Open a QR code in your browser
 3. You scan it with WhatsApp: Settings > Linked Devices > Link a Device
 4. Credentials are saved to `~/.whazaa/auth/`
@@ -563,7 +563,7 @@ messages that arrived while you were offline.
 
 ## Manual MCP configuration
 
-If you prefer to configure manually, add to `~/.claude/.mcp.json`:
+If you prefer to configure manually, add to `~/.claude.json`:
 
 ```json
 {
@@ -664,7 +664,7 @@ The Kokoro model (~160 MB) is downloaded on first use and cached locally. Subseq
 npx -y whazaa uninstall
 ```
 
-Removes Whazaa from `~/.claude/.mcp.json` and deletes credentials from `~/.whazaa/`. Restart Claude Code to apply.
+Removes Whazaa from `~/.claude.json` and deletes credentials from `~/.whazaa/`. Restart Claude Code to apply.
 
 ---
 

@@ -90,13 +90,13 @@ If the build fails, report the compiler error to the user and stop.
 
 ## Step 4: Configure MCP
 
-Add Whazaa to `~/.claude/.mcp.json` pointing to the local build. Using a local path
+Add Whazaa to `~/.claude.json` pointing to the local build. Using a local path
 (not `npx whazaa`) ensures Claude Code uses this specific build.
 
 Read the current file first to avoid clobbering existing entries:
 
 ```bash
-cat ~/.claude/.mcp.json 2>/dev/null || echo "File does not exist"
+cat ~/.claude.json 2>/dev/null || echo "File does not exist"
 ```
 
 Then write the updated config. The key change from the `npx` default: use `node` +
@@ -120,7 +120,7 @@ Replace `/ABSOLUTE/PATH/TO/Whazaa` with the actual repo path.
 Verification:
 
 ```bash
-cat ~/.claude/.mcp.json | python3 -c "import json,sys; d=json.load(sys.stdin); print('whazaa entry:', d.get('mcpServers',{}).get('whazaa'))"
+cat ~/.claude.json | python3 -c "import json,sys; d=json.load(sys.stdin); print('whazaa entry:', d.get('mcpServers',{}).get('whazaa'))"
 ```
 
 ---
@@ -180,7 +180,7 @@ node "$REPO/dist/index.js" setup
 
 This command:
 1. Opens the GitHub repo in your browser (informational)
-2. Detects if `~/.claude/.mcp.json` already has Whazaa (skips if so)
+2. Detects if `~/.claude.json` already has Whazaa (skips if so)
 3. Checks `~/.whazaa/auth/creds.json` — if it exists, verifies the existing session
 4. If no session or session expired: generates a QR code in the browser
 5. Waits for the phone scan and prints the connected phone number on success
@@ -280,7 +280,7 @@ messages that arrived while you were offline.
 - [ ] ffmpeg installed (for TTS)
 - [ ] `npm install` completed
 - [ ] `npm run build` completed — `dist/index.js` exists
-- [ ] `~/.claude/.mcp.json` has `whazaa` entry pointing to local `dist/index.js`
+- [ ] `~/.claude.json` has `whazaa` entry pointing to local `dist/index.js`
 - [ ] Watcher launchd service loaded and running (`com.whazaa.watcher`)
 - [ ] WhatsApp session paired — `~/.whazaa/auth/creds.json` exists
 - [ ] Claude Code restarted

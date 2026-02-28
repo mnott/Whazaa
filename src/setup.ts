@@ -9,7 +9,7 @@
  * server.
  *
  * ### Setup wizard (`setup`)
- * 1. Writes the Whazaa entry into `~/.claude/.mcp.json` so Claude Code
+ * 1. Writes the Whazaa entry into `~/.claude.json` so Claude Code
  *    discovers the MCP server automatically.
  * 2. Installs the `/name` skill for session renaming.
  * 3. Checks whether an existing WhatsApp session (creds.json) is still
@@ -18,7 +18,7 @@
  * 5. Lets Baileys finish its initial sync, then exits.
  *
  * ### Uninstall (`uninstall`)
- * - Removes the Whazaa entry from `~/.claude/.mcp.json`.
+ * - Removes the Whazaa entry from `~/.claude.json`.
  * - Deletes the Baileys auth credential directory.
  * - Removes the `~/.whazaa/` directory if it is empty.
  */
@@ -58,7 +58,7 @@ export function openBrowser(url: string): void {
 
 /**
  * Run the interactive Whazaa setup wizard (`npx whazaa setup`).
- * Configures ~/.claude/.mcp.json, installs the /name skill, verifies or
+ * Configures ~/.claude.json, installs the /name skill, verifies or
  * performs QR pairing, and exits.
  */
 export async function setup(): Promise<void> {
@@ -71,9 +71,9 @@ export async function setup(): Promise<void> {
   console.log("\nWhazaa Setup\n");
 
   // ------------------------------------------------------------------
-  // Step 1: Configure ~/.claude/.mcp.json
+  // Step 1: Configure ~/.claude.json
   // ------------------------------------------------------------------
-  const mcpPath = join(homedir(), ".claude", ".mcp.json");
+  const mcpPath = join(homedir(), ".claude.json");
 
   interface McpConfig {
     mcpServers?: Record<string, { command: string; args: string[] }>;
@@ -85,17 +85,17 @@ export async function setup(): Promise<void> {
     try {
       config = JSON.parse(readFileSync(mcpPath, "utf-8")) as McpConfig;
     } catch {
-      console.log("Warning: ~/.claude/.mcp.json exists but could not be parsed. Overwriting.");
+      console.log("Warning: ~/.claude.json exists but could not be parsed. Overwriting.");
       config = {};
     }
 
     if (config.mcpServers?.whazaa) {
-      console.log("Already configured in ~/.claude/.mcp.json");
+      console.log("Already configured in ~/.claude.json");
     } else {
       config.mcpServers = config.mcpServers ?? {};
       config.mcpServers.whazaa = { command: "npx", args: ["-y", "whazaa"] };
       writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-      console.log("Added Whazaa to ~/.claude/.mcp.json");
+      console.log("Added Whazaa to ~/.claude.json");
     }
   } else {
     mkdirSync(dirname(mcpPath), { recursive: true });
@@ -105,7 +105,7 @@ export async function setup(): Promise<void> {
       },
     };
     writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-    console.log("Created ~/.claude/.mcp.json with Whazaa");
+    console.log("Created ~/.claude.json with Whazaa");
   }
 
   // ------------------------------------------------------------------
@@ -222,19 +222,19 @@ export async function setup(): Promise<void> {
 export async function uninstall(): Promise<void> {
   console.log("Whazaa Uninstall\n");
 
-  const mcpPath = join(homedir(), ".claude", ".mcp.json");
+  const mcpPath = join(homedir(), ".claude.json");
   if (existsSync(mcpPath)) {
     try {
       const config = JSON.parse(readFileSync(mcpPath, "utf-8"));
       if (config.mcpServers?.whazaa) {
         delete config.mcpServers.whazaa;
         writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-        console.log("Removed Whazaa from ~/.claude/.mcp.json");
+        console.log("Removed Whazaa from ~/.claude.json");
       } else {
-        console.log("Whazaa not found in ~/.claude/.mcp.json");
+        console.log("Whazaa not found in ~/.claude.json");
       }
     } catch {
-      console.log("Warning: could not parse ~/.claude/.mcp.json");
+      console.log("Warning: could not parse ~/.claude.json");
     }
   }
 
