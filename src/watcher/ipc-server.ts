@@ -82,6 +82,7 @@ import {
   resolveJid,
   resolveRecipient,
   trackContact,
+  markdownToWhatsApp,
   MIME_MAP,
 } from "./contacts.js";
 import { watcherSendMessage } from "./send.js";
@@ -370,12 +371,67 @@ async function handleSendFile(
 
   const fileRecipient = params.recipient != null ? String(params.recipient) : undefined;
   const fileCaption = params.caption != null ? String(params.caption) : undefined;
+  const prettify = params.prettify === true;
   const targetJidFile = fileRecipient ? resolveRecipient(fileRecipient) : watcherStatus.selfJid!;
+
+  // Prettify mode: convert text/markdown files to WhatsApp-formatted messages
+  const fileName = basename(filePath);
+  const ext = fileName.includes(".") ? "." + fileName.split(".").pop()!.toLowerCase() : "";
+  const TEXT_EXTS = new Set([".md", ".txt", ".csv", ".json", ".log", ".xml", ".yaml", ".yml"]);
+
+  if (prettify && TEXT_EXTS.has(ext)) {
+    try {
+      const raw = readFileSync(filePath, "utf-8");
+      const formatted = markdownToWhatsApp(raw);
+
+      // WhatsApp max message length is ~65536; chunk if needed
+      const MAX_CHUNK = 60_000;
+      const chunks: string[] = [];
+      for (let i = 0; i < formatted.length; i += MAX_CHUNK) {
+        chunks.push(formatted.slice(i, i + MAX_CHUNK));
+      }
+
+      stopTypingIndicator();
+      // Send caption first if provided
+      if (fileCaption) {
+        const captionText = "\uFEFF" + markdownToWhatsApp(fileCaption);
+        const r = await watcherSock!.sendMessage(targetJidFile, { text: captionText });
+        const capMsgId = r?.key?.id;
+        if (capMsgId) {
+          sentMessageIds.add(capMsgId);
+          setTimeout(() => sentMessageIds.delete(capMsgId), 30_000);
+        }
+      }
+
+      for (const chunk of chunks) {
+        const text = "\uFEFF" + chunk;
+        const r = await watcherSock!.sendMessage(targetJidFile, { text });
+        const chunkMsgId = r?.key?.id;
+        if (chunkMsgId) {
+          sentMessageIds.add(chunkMsgId);
+          setTimeout(() => sentMessageIds.delete(chunkMsgId), 30_000);
+        }
+      }
+
+      if (targetJidFile !== watcherStatus.selfJid) {
+        trackContact(targetJidFile, null, Date.now());
+      }
+
+      sendResponse(socket, {
+        id,
+        ok: true,
+        result: { fileName, fileSize: raw.length, targetJid: targetJidFile, prettified: true, chunks: chunks.length },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendResponse(socket, { id, ok: false, error: msg });
+    }
+    socket.end();
+    return;
+  }
 
   try {
     const fileBuffer = readFileSync(filePath);
-    const fileName = basename(filePath);
-    const ext = fileName.includes(".") ? "." + fileName.split(".").pop()!.toLowerCase() : "";
     const mimetype = MIME_MAP[ext] ?? "application/octet-stream";
 
     let sendContent: Record<string, unknown>;

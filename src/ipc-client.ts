@@ -284,10 +284,11 @@ export class WatcherClient {
     return result as unknown as VoiceConfigResult;
   }
 
-  async sendFile(filePath: string, recipient?: string, caption?: string): Promise<SendFileResult> {
+  async sendFile(filePath: string, recipient?: string, caption?: string, prettify?: boolean): Promise<SendFileResult> {
     const params: Record<string, unknown> = { filePath };
     if (recipient !== undefined) params.recipient = recipient;
     if (caption !== undefined) params.caption = caption;
+    if (prettify !== undefined) params.prettify = prettify;
     const result = await this.call("send_file", params);
     return result as unknown as SendFileResult;
   }

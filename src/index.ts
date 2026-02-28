@@ -225,15 +225,20 @@ server.registerTool("whatsapp_tts", {
 );
 
 server.registerTool("whatsapp_send_file", {
-  description: "Send a file (document, image, video, audio) via WhatsApp. Supports any file type — PDFs, Word docs, images, videos, etc.",
+  description: [
+    "Send a file (document, image, video, audio) via WhatsApp. Supports any file type — PDFs, Word docs, images, videos, etc.",
+    "Set prettify=true to convert text/markdown files into WhatsApp-formatted messages instead of raw file attachments.",
+    "Prettified files are sent as readable text with WhatsApp formatting (bold, bullets, etc.) rather than as downloadable .md/.txt files.",
+  ].join(" "),
   inputSchema: {
     filePath: z.string().min(1).describe("Absolute path to the file to send"),
     recipient: z.string().optional().describe("Optional recipient: phone number, JID, or contact name. Omit to send to self-chat."),
     caption: z.string().optional().describe("Optional caption/message to accompany the file"),
+    prettify: z.boolean().optional().describe("Convert text/markdown files to WhatsApp-formatted messages instead of sending as file attachments. Default: false."),
   },
-}, async ({ filePath, recipient, caption }) => {
+}, async ({ filePath, recipient, caption, prettify }) => {
     try {
-      await watcher.sendFile(filePath, recipient, caption);
+      await watcher.sendFile(filePath, recipient, caption, prettify);
       return { content: [{ type: "text", text: "Sent." }] };
     } catch (err) {
       return errorResponse(err);
