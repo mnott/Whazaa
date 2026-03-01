@@ -39,3 +39,7 @@ tasks/
 
 # Whisper test artifacts
 test_noise.*
+
+# Obsidian vault metadata (wikilink index files)
+Whazaa.md
+_index.md
