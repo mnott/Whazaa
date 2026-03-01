@@ -112,6 +112,7 @@ export interface TtsResult {
   targetJid: string;
   voice: string;
   bytesSent: number;
+  chunks?: number;
 }
 
 export interface VoiceConfigResult {

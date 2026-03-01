@@ -189,6 +189,7 @@ server.registerTool("whatsapp_tts", {
     "Uses Kokoro TTS — 100% local, no internet required after first run.",
     "The model (~160 MB) is downloaded on first use and cached locally.",
     `Available voices: ${listVoices().join(", ")}.`,
+    "Long messages are automatically split into sequential voice notes at sentence boundaries.",
     "Without a recipient, sends to your own self-chat.",
     "With a recipient, sends to any contact or group.",
   ].join(" "),
@@ -217,7 +218,9 @@ server.registerTool("whatsapp_tts", {
         voice: voice,
         jid: recipient,
       });
-      return { content: [{ type: "text", text: "Sent." }] };
+      const chunks = result.chunks ?? 1;
+      const msg = chunks > 1 ? `Sent ${chunks} voice notes.` : "Sent.";
+      return { content: [{ type: "text", text: msg }] };
     } catch (err) {
       return errorResponse(err);
     }
