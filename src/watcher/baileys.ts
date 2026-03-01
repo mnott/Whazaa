@@ -306,12 +306,15 @@ export async function connectWatcher(
           watcherStatus.selfLid = lid;
         }
 
-        log(`WhatsApp connected. Phone: +${watcherStatus.phoneNumber ?? "unknown"}`);
+        const isReconnect = reconnectAttempts > 0;
+        log(`WhatsApp ${isReconnect ? "reconnected" : "connected"}. Phone: +${watcherStatus.phoneNumber ?? "unknown"}`);
 
-        // Send a startup confirmation to WhatsApp so remote users know
-        // the watcher is alive (especially useful after /restart).
+        // Send a confirmation to WhatsApp so remote users know what happened.
         import("./send.js").then(({ watcherSendMessage }) => {
-          watcherSendMessage("Whazaa watcher started.").catch(() => {});
+          const msg = isReconnect
+            ? "Whazaa reconnected (WhatsApp dropped the connection)."
+            : "Whazaa watcher started.";
+          watcherSendMessage(msg).catch(() => {});
         }).catch(() => {});
       }
 
