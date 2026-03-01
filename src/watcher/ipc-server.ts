@@ -854,6 +854,40 @@ async function handleHistory(
   socket.end();
 }
 
+// Split text into chunks at natural boundaries for sequential voice notes.
+function splitIntoChunks(text: string, maxLen = 800): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  // Split on paragraph breaks first
+  const paragraphs = text.split(/\n\n+/);
+
+  let current = "";
+  for (const para of paragraphs) {
+    if (current && (current + "\n\n" + para).length > maxLen) {
+      chunks.push(current.trim());
+      current = "";
+    }
+    if (para.length > maxLen) {
+      // Paragraph too long — split on sentence endings
+      if (current) { chunks.push(current.trim()); current = ""; }
+      const sentences = para.split(/(?<=[.!?])\s+/);
+      for (const sentence of sentences) {
+        if (current && (current + " " + sentence).length > maxLen) {
+          chunks.push(current.trim());
+          current = "";
+        }
+        current = current ? current + " " + sentence : sentence;
+      }
+    } else {
+      current = current ? current + "\n\n" + para : para;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+
+  return chunks.length > 0 ? chunks : [text];
+}
+
 // Convert text to a voice note (Kokoro TTS) and send via WhatsApp.
 async function handleTts(
   socket: Socket,
@@ -876,18 +910,26 @@ async function handleTts(
   const targetJid = ttsRecipient ? resolveRecipient(ttsRecipient) : watcherStatus.selfJid!;
 
   try {
-    const audioBuffer = await textToVoiceNote(ttsText, ttsVoice);
+    const chunks = splitIntoChunks(ttsText);
+    let totalBytes = 0;
 
-    const result = await watcherSock!.sendMessage(targetJid, {
-      audio: audioBuffer,
-      mimetype: "audio/ogg; codecs=opus",
-      ptt: true,
-    });
+    for (let i = 0; i < chunks.length; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 1000));
 
-    if (result?.key?.id) {
-      const msgId = result.key.id;
-      sentMessageIds.add(msgId);
-      setTimeout(() => sentMessageIds.delete(msgId), 30_000);
+      const audioBuffer = await textToVoiceNote(chunks[i], ttsVoice);
+      totalBytes += audioBuffer.length;
+
+      const result = await watcherSock!.sendMessage(targetJid, {
+        audio: audioBuffer,
+        mimetype: "audio/ogg; codecs=opus",
+        ptt: true,
+      });
+
+      if (result?.key?.id) {
+        const msgId = result.key.id;
+        sentMessageIds.add(msgId);
+        setTimeout(() => sentMessageIds.delete(msgId), 30_000);
+      }
     }
 
     // Track outbound contact (non-self only)
@@ -901,7 +943,8 @@ async function handleTts(
       result: {
         targetJid,
         voice: ttsVoice ?? process.env.WHAZAA_TTS_VOICE ?? "bm_fable",
-        bytesSent: audioBuffer.length,
+        bytesSent: totalBytes,
+        chunks: chunks.length,
       },
     });
   } catch (err) {
