@@ -33,7 +33,7 @@ Your phone
                             whatsapp_tts / whatsapp_speak / whatsapp_voice_config
 ```
 
-The separation means you can have multiple Claude Code sessions open simultaneously. Each MCP server instance registers its `TERM_SESSION_ID` with the watcher, and whichever session most recently sent a message becomes the active recipient for incoming messages.
+The separation means you can have multiple Claude Code sessions open simultaneously. Each MCP server instance registers its `TERM_SESSION_ID` with the watcher. The first session to register becomes the active recipient for incoming messages; use `/N` from WhatsApp or `whatsapp_switch` to change the active session.
 
 ---
 
@@ -507,9 +507,9 @@ Supported formats: JPEG, PNG, WebP, GIF, and stickers.
 
 ## Multiple sessions
 
-Whazaa supports multiple simultaneous Claude Code windows. Each MCP server instance registers its `TERM_SESSION_ID` when it starts. Whichever session most recently called `whatsapp_send` becomes the active recipient for incoming messages.
+Whazaa supports multiple simultaneous Claude Code windows. Each MCP server instance registers its `TERM_SESSION_ID` when it starts. The first session to register becomes the active recipient for incoming messages and stays active until explicitly switched or disconnected.
 
-The watcher maintains a separate incoming message queue for each registered session. If no session has sent a message yet, the first registered session is used.
+The watcher maintains a separate incoming message queue for each registered session. Use `/N name` from WhatsApp or `whatsapp_switch` from MCP to change which session receives incoming messages. Sending a message does **not** automatically change the active session.
 
 Sessions register with a name derived from the working directory (e.g. a Claude session in `~/projects/myapp` registers as `myapp`). Use `/s` to see all sessions and `/N name` to assign a custom name.
 
