@@ -163,6 +163,11 @@ export interface CommandResult {
   command: string;
 }
 
+export interface DictateResult {
+  transcript: string;
+  durationMs: number;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -324,6 +329,13 @@ export class WatcherClient {
   async command(text: string): Promise<CommandResult> {
     const result = await this.call("command", { text });
     return result as unknown as CommandResult;
+  }
+
+  async dictate(maxDuration?: number): Promise<DictateResult> {
+    const params: Record<string, unknown> = {};
+    if (maxDuration !== undefined) params.maxDuration = maxDuration;
+    const result = await this.call("dictate", params);
+    return result as unknown as DictateResult;
   }
 
   // -------------------------------------------------------------------------

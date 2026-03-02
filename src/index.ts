@@ -53,7 +53,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { watch } from "./watcher/index.js";
 import { setup, uninstall } from "./setup.js";
-import { WatcherClient, ChatsResult, CommandResult, DiscoverResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult, SessionListResult, SwitchResult, EndSessionResult } from "./ipc-client.js";
+import { WatcherClient, ChatsResult, CommandResult, DictateResult, DiscoverResult, HistoryResult, TtsResult, VoiceConfigResult, SpeakResult, SessionListResult, SwitchResult, EndSessionResult } from "./ipc-client.js";
 import { listVoices } from "./tts.js";
 import { listChats, getMessages, isDesktopDbAvailable } from "./desktop-db.js";
 
@@ -924,6 +924,35 @@ server.registerTool("whatsapp_command", {
     const result: CommandResult = await watcher.command(command);
     return {
       content: [{ type: "text", text: `Executed: ${result.command}` }],
+    };
+  } catch (err) {
+    return errorResponse(err);
+  }
+});
+
+server.registerTool("whatsapp_dictate", {
+  description: [
+    "Record audio from the Mac's microphone, transcribe it with Whisper, and type the transcript into the active Claude Code session.",
+    "Recording starts immediately and stops after ~2 seconds of silence.",
+    "Useful when the user says 'I'll tell you by voice', 'let me dictate', 'voice input', or similar.",
+    "Requires sox to be installed (brew install sox).",
+  ].join(" "),
+  inputSchema: {
+    maxDuration: z
+      .number()
+      .min(5)
+      .max(300)
+      .optional()
+      .describe("Maximum recording duration in seconds (default 60). Recording stops earlier on silence."),
+  },
+}, async ({ maxDuration }) => {
+  try {
+    const result: DictateResult = await watcher.dictate(maxDuration);
+    if (!result.transcript) {
+      return { content: [{ type: "text", text: "No speech detected." }] };
+    }
+    return {
+      content: [{ type: "text", text: `Transcribed (${(result.durationMs / 1000).toFixed(1)}s): ${result.transcript}` }],
     };
   } catch (err) {
     return errorResponse(err);
