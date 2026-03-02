@@ -102,7 +102,8 @@ import {
   getSessionList,
   handleEndSession,
 } from "./iterm-sessions.js";
-import { isItermSessionAlive, runAppleScript, stripItermPrefix, snapshotAllSessions } from "./iterm-core.js";
+import { isItermSessionAlive, runAppleScript, stripItermPrefix, snapshotAllSessions, typeIntoSession } from "./iterm-core.js";
+import { recordFromMic, transcribeLocalAudio } from "./dictation.js";
 import { log } from "./log.js";
 import type { IpcRequest, IpcResponse, QueuedMessage } from "./types.js";
 
@@ -1093,6 +1094,47 @@ end tell`;
 }
 
 // End a session (close tab + cleanup) by index or name substring.
+/**
+ * Record audio from the local mic, transcribe via Whisper, and type the
+ * transcript into the caller's iTerm2 session.
+ */
+async function handleDictate(socket: Socket, id: string, sessionId: string, params: Record<string, unknown>): Promise<void> {
+  const maxDuration = typeof params.maxDuration === "number" ? params.maxDuration : 60;
+  const startMs = Date.now();
+
+  let audioPath: string | undefined;
+  try {
+    audioPath = await recordFromMic(maxDuration);
+    const transcript = await transcribeLocalAudio(audioPath);
+    const durationMs = Date.now() - startMs;
+
+    if (!transcript) {
+      sendResponse(socket, { id, ok: true, result: { transcript: "", durationMs } });
+      socket.end();
+      return;
+    }
+
+    // Type transcript into the caller's iTerm2 session
+    const entry = sessionRegistry.get(sessionId);
+    if (entry?.itermSessionId) {
+      typeIntoSession(entry.itermSessionId, transcript);
+    } else if (activeItermSessionId) {
+      typeIntoSession(activeItermSessionId, transcript);
+    }
+
+    sendResponse(socket, { id, ok: true, result: { transcript, durationMs } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendResponse(socket, { id, ok: false, error: msg });
+  } finally {
+    // Clean up the recorded audio file
+    if (audioPath) {
+      try { unlinkSync(audioPath); } catch { /* ignore */ }
+    }
+  }
+  socket.end();
+}
+
 async function handleEndSessionIpc(socket: Socket, id: string, params: Record<string, unknown>): Promise<void> {
   const target = params.target != null ? String(params.target) : "";
   if (!target) {
@@ -1307,6 +1349,7 @@ async function handleRequest(
     case "sessions":     return handleSessions(socket, id);
     case "switch":       return handleSwitch(socket, id, params);
     case "end_session":  return handleEndSessionIpc(socket, id, params);
+    case "dictate":      return handleDictate(socket, id, sessionId, params);
     default:
       sendResponse(socket, { id, ok: false, error: `Unknown method: ${method}` });
       socket.end();
