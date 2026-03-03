@@ -551,7 +551,25 @@ end tell`;
     if (trimmedText === "/ss" || trimmedText === "/screenshot") {
       const backend = router.defaultBackend;
       if (backend instanceof APIBackend) {
-        watcherSendMessage("Screenshots are not available in API mode (no iTerm session).").catch(() => {});
+        const sessions = backend.listSessions();
+        const active = sessions.find(s => s.id === backend.activeSessionId);
+        const lines = [
+          `*API Mode Status*`,
+          `Model: ${backend.model}`,
+          `Sessions: ${sessions.length}`,
+          ``,
+        ];
+        for (const s of sessions) {
+          const isActive = s.id === backend.activeSessionId;
+          const age = Date.now() - s.lastActive;
+          const ago = age < 60_000 ? `${Math.round(age / 1000)}s ago`
+            : age < 3_600_000 ? `${Math.round(age / 60_000)}m ago`
+            : `${Math.round(age / 3_600_000)}h ago`;
+          const ctx = s.claudeSessionId ? "has context" : "fresh";
+          lines.push(`${isActive ? "*" : " "}${s.name} (${s.cwd})`);
+          lines.push(`  ${ctx}, last active ${ago}`);
+        }
+        watcherSendMessage(lines.join("\n")).catch(() => {});
         return;
       }
       handleScreenshot().catch((err) => {
