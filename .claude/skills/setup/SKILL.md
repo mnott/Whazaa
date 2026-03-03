@@ -144,6 +144,19 @@ Verification:
 cat ~/.claude.json | python3 -c "import json,sys; d=json.load(sys.stdin); print('whazaa entry:', d.get('mcpServers',{}).get('whazaa'))"
 ```
 
+Also ensure `~/.claude/settings.json` has `"mcp__whazaa"` in the `permissions.allow` array.
+Without this, Claude Code will prompt for permission on every tool call.
+
+```json
+{
+  "permissions": {
+    "allow": ["mcp__whazaa"]
+  }
+}
+```
+
+Merge this into the existing `settings.json` — do not overwrite other entries.
+
 ---
 
 ## Step 5: Set Up Watcher Launchd Service
