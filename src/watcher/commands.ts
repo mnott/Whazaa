@@ -83,7 +83,7 @@ import {
   createClaudeSession,
 } from "./iterm-sessions.js";
 import { handleScreenshot } from "./screenshot.js";
-import { watcherSendMessage } from "./send.js";
+import { watcherSendMessage, watcherSendVoice } from "./send.js";
 import {
   runAppleScript,
   findClaudeSession,
@@ -549,6 +549,11 @@ end tell`;
 
     // --- /ss, /screenshot — capture and send iTerm2 window screenshot ---------
     if (trimmedText === "/ss" || trimmedText === "/screenshot") {
+      const backend = router.defaultBackend;
+      if (backend instanceof APIBackend) {
+        watcherSendMessage("Screenshots are not available in API mode (no iTerm session).").catch(() => {});
+        return;
+      }
       handleScreenshot().catch((err) => {
         log(`/ss: unhandled error — ${err}`);
       });
@@ -805,10 +810,12 @@ end tell`;
       const activeApiSessionId = (backend instanceof APIBackend)
         ? backend.activeSessionId
         : "whazaa-default";
-      log(`API backend active (${backend.name}) — delivering via subprocess (session: ${activeApiSessionId})`);
+      const isVoiceMessage = textToDeliver.includes(":voice]");
+      log(`API backend active (${backend.name}) — delivering via subprocess (session: ${activeApiSessionId}, voice: ${isVoiceMessage})`);
       backend.deliver(textToDeliver, activeApiSessionId).then((response) => {
         if (response) {
-          watcherSendMessage(response).catch((err) => {
+          const sendFn = isVoiceMessage ? watcherSendVoice : watcherSendMessage;
+          sendFn(response).catch((err) => {
             log(`Failed to send API backend response: ${err}`);
           });
         }
