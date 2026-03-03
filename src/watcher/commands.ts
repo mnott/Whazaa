@@ -329,8 +329,8 @@ export function createMessageHandler(
         "/s — List sessions",
         "/N — Switch to session N",
         "/N name — Switch & rename",
-        "/n path — New headless session",
-        "/nv path — New visual session (iTerm2)",
+        "/n path — New visual session (iTerm2)",
+        "/nh path — New headless session",
         "/t [cmd] — Open terminal tab",
         "/r N — Restart Claude in session N",
         "/e N — End session (close tab)",
@@ -355,34 +355,34 @@ export function createMessageHandler(
       return;
     }
 
-    // --- /nv <path> — new visual (iTerm2) session ----
-    const nvMatch = trimmedText.match(/^\/nv\s+(.+)$/);
-    if (nvMatch) {
-      const targetPath = nvMatch[1].trim();
+    // --- /nh <path> — new headless (API) session ----
+    const nhMatch = trimmedText.match(/^\/nh\s+(.+)$/);
+    if (nhMatch) {
+      const targetPath = nhMatch[1].trim();
       if (targetPath && hybridManager) {
-        const newSessionId = handleRelocate(targetPath);
-        if (newSessionId) {
-          const name = basename(targetPath);
-          hybridManager.registerVisualSession(name, targetPath, newSessionId);
-          setActiveSessionId(newSessionId);
-          setActiveItermSessionId(newSessionId);
-          log(`/nv: created visual session "${name}" (iTerm2=${newSessionId})`);
-          watcherSendMessage(`New visual session: *${name}* (${targetPath})`).catch(() => {});
-        }
+        const name = basename(targetPath);
+        const session = hybridManager.createApiSession(name, targetPath);
+        log(`/nh: created API session "${session.name}" (${session.id}) cwd=${session.cwd}`);
+        watcherSendMessage(`New headless session: *${session.name}* (${session.cwd})`).catch(() => {});
       }
       return;
     }
 
-    // --- /n <path> (aliases: /new, /relocate) — new headless (API) session ----
-    const relocateMatch = trimmedText.match(/^\/(?:n|new|relocate)\s+(.+)$/);
+    // --- /n <path> (aliases: /nv, /new, /relocate) — new visual (iTerm2) session ----
+    const relocateMatch = trimmedText.match(/^\/(?:n|nv|new|relocate)\s+(.+)$/);
     if (relocateMatch) {
       const targetPath = relocateMatch[1].trim();
       if (targetPath) {
         if (hybridManager) {
-          const name = basename(targetPath);
-          const session = hybridManager.createApiSession(name, targetPath);
-          log(`/n: created API session "${session.name}" (${session.id}) cwd=${session.cwd}`);
-          watcherSendMessage(`New session: *${session.name}* (${session.cwd})`).catch(() => {});
+          const newSessionId = handleRelocate(targetPath);
+          if (newSessionId) {
+            const name = basename(targetPath);
+            hybridManager.registerVisualSession(name, targetPath, newSessionId);
+            setActiveSessionId(newSessionId);
+            setActiveItermSessionId(newSessionId);
+            log(`/n: created visual session "${name}" (iTerm2=${newSessionId})`);
+            watcherSendMessage(`New visual session: *${name}* (${targetPath})`).catch(() => {});
+          }
           return;
         }
         // Fallback: visual session if no hybrid manager
