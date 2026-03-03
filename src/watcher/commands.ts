@@ -99,7 +99,8 @@ import {
 } from "./iterm-core.js";
 import { startTypingIndicator } from "./typing.js";
 import { log } from "./log.js";
-import { router } from "aibroker";
+import { router, APIBackend } from "aibroker";
+import type { APISession } from "aibroker";
 
 /**
  * Create the top-level message handler function used by `watch()`.
@@ -358,6 +359,14 @@ export function createMessageHandler(
     if (relocateMatch) {
       const targetPath = relocateMatch[1].trim();
       if (targetPath) {
+        const backend = router.defaultBackend;
+        if (backend instanceof APIBackend) {
+          const name = basename(targetPath);
+          const session = backend.createSession(name, targetPath);
+          log(`/n API mode: created session "${session.name}" (${session.id}) cwd=${session.cwd}`);
+          watcherSendMessage(`New session: *${session.name}* (${session.cwd})`).catch(() => {});
+          return;
+        }
         const newSessionId = handleRelocate(targetPath);
         if (newSessionId) {
           setActiveSessionId(newSessionId);
@@ -372,6 +381,22 @@ export function createMessageHandler(
 
     // --- /sessions (aliases: /s) — list sessions ------------------------------
     if (trimmedText === "/sessions" || trimmedText === "/s") {
+      const backend = router.defaultBackend;
+      if (backend instanceof APIBackend) {
+        const sessions = backend.listSessions();
+        if (sessions.length === 0) {
+          watcherSendMessage("No API sessions. Use /n <path> to create one.").catch(() => {});
+          return;
+        }
+        const lines = sessions.map((s: APISession, i: number) => {
+          const isActive = s.id === backend.activeSessionId;
+          const cwdDisplay = s.cwd ? ` (${s.cwd})` : "";
+          return `${isActive ? "*" : " "}${i + 1}. ${s.name}${cwdDisplay}`;
+        });
+        watcherSendMessage(lines.join("\n")).catch(() => {});
+        return;
+      }
+
       ensureActiveSession();
 
       // Re-read the (now pruned/updated) cached session list
@@ -413,6 +438,21 @@ export function createMessageHandler(
     if (sessionSwitchMatch) {
       const num = parseInt(sessionSwitchMatch[1], 10);
       const newName = sessionSwitchMatch[2]?.trim() || null;
+
+      const backend = router.defaultBackend;
+      if (backend instanceof APIBackend) {
+        const session = backend.getSessionByIndex(num);
+        if (!session) {
+          const count = backend.listSessions().length;
+          watcherSendMessage(`Invalid session number. Use /s to list (1-${count}).`).catch(() => {});
+          return;
+        }
+        backend.activeSessionId = session.id;
+        log(`/N API mode: switched active session to "${session.name}" (${session.id})`);
+        watcherSendMessage(`Switched to *${session.name}*`).catch(() => {});
+        return;
+      }
+
       // Use the cached list from the last /s call (valid for 60s) so the
       // session numbers match what was displayed. Fall back to a fresh call.
       const CACHE_TTL_MS = 60_000;
@@ -517,6 +557,14 @@ end tell`;
 
     // --- /c — send /clear then "go" to active Claude session ----------------
     if (trimmedText === "/c") {
+      const backend = router.defaultBackend;
+      if (backend instanceof APIBackend) {
+        backend.clearSession();
+        log("/c API mode: cleared active session conversation history");
+        watcherSendMessage("Session cleared.").catch(() => {});
+        return;
+      }
+
       ensureActiveSession();
       if (!activeItermSessionId) {
         watcherSendMessage("No active session.").catch(() => {});
@@ -698,6 +746,24 @@ end tell`;
     const endMatch = trimmedText.match(/^\/(?:end|e)\s+(\d+)$/);
     if (endMatch) {
       const num = parseInt(endMatch[1], 10);
+      const backend = router.defaultBackend;
+      if (backend instanceof APIBackend) {
+        const session = backend.getSessionByIndex(num);
+        if (!session) {
+          const count = backend.listSessions().length;
+          watcherSendMessage(`Invalid session number. Use /s to list (1-${count}).`).catch(() => {});
+          return;
+        }
+        const ended = backend.endSession(session.id);
+        if (ended) {
+          log(`/e API mode: ended session "${session.name}" (${session.id})`);
+          watcherSendMessage(`Ended session *${session.name}*.`).catch(() => {});
+        } else {
+          watcherSendMessage("Failed to end session.").catch(() => {});
+        }
+        return;
+      }
+
       const sessions = getSessionList();
       if (sessions.length === 0) {
         watcherSendMessage("No sessions found.").catch(() => {});
@@ -733,11 +799,14 @@ end tell`;
 
     // Check if router has an API backend — if so, deliver via subprocess
     // and send the response directly back to WhatsApp (no iTerm2 needed).
-    // Uses "whazaa-default" as session ID for context persistence across messages.
+    // Uses the backend's active session ID for context persistence across messages.
     const backend = router.defaultBackend;
     if (backend?.type === "api") {
-      log(`API backend active (${backend.name}) — delivering via subprocess`);
-      backend.deliver(textToDeliver, "whazaa-default").then((response) => {
+      const activeApiSessionId = (backend instanceof APIBackend)
+        ? backend.activeSessionId
+        : "whazaa-default";
+      log(`API backend active (${backend.name}) — delivering via subprocess (session: ${activeApiSessionId})`);
+      backend.deliver(textToDeliver, activeApiSessionId).then((response) => {
         if (response) {
           watcherSendMessage(response).catch((err) => {
             log(`Failed to send API backend response: ${err}`);
