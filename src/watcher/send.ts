@@ -21,7 +21,11 @@
 import { watcherSock, watcherStatus, sentMessageIds } from "./state.js";
 import { resolveRecipient, markdownToWhatsApp, trackContact } from "./contacts.js";
 import { stopTypingIndicator } from "./typing.js";
-import { broadcastText } from "./ws-gateway.js";
+import { broadcastText, broadcastVoice } from "./ws-gateway.js";
+import { textToVoiceNote } from "../tts.js";
+import { splitIntoChunks } from "aibroker";
+import { loadVoiceConfig } from "./persistence.js";
+import { log } from "./log.js";
 
 export async function watcherSendMessage(message: string, recipient?: string): Promise<string> {
   if (!watcherSock) {
@@ -64,4 +68,38 @@ export async function watcherSendMessage(message: string, recipient?: string): P
 
   const preview = message.length > 80 ? `${message.slice(0, 80)}...` : message;
   return preview;
+}
+
+/** Send a voice note (TTS) to self-chat or a recipient. Auto-chunks long text. */
+export async function watcherSendVoice(text: string, recipient?: string): Promise<void> {
+  if (!watcherSock) throw new Error("WhatsApp socket not initialized.");
+  if (!watcherStatus.connected) throw new Error("WhatsApp is not connected.");
+  if (!watcherStatus.selfJid) throw new Error("Self JID not yet known.");
+
+  const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+  const voice = loadVoiceConfig().defaultVoice;
+  const chunks = splitIntoChunks(text);
+
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 1000));
+
+    const audioBuffer = await textToVoiceNote(chunks[i], voice);
+
+    if (targetJid === watcherStatus.selfJid) {
+      broadcastVoice(audioBuffer, chunks[i]);
+    }
+
+    const result = await watcherSock.sendMessage(targetJid, {
+      audio: audioBuffer,
+      mimetype: "audio/ogg; codecs=opus",
+      ptt: true,
+    });
+
+    if (result?.key?.id) {
+      sentMessageIds.add(result.key.id);
+      setTimeout(() => sentMessageIds.delete(result.key.id!), 30_000);
+    }
+  }
+
+  log(`Voice sent (${chunks.length} chunk${chunks.length > 1 ? "s" : ""}) to ${targetJid}`);
 }
