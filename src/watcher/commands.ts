@@ -99,8 +99,8 @@ import {
 } from "./iterm-core.js";
 import { startTypingIndicator } from "./typing.js";
 import { log } from "./log.js";
-import { router, APIBackend, deliverViaApi } from "aibroker";
-import type { APISession } from "aibroker";
+import { router, deliverViaApi, hybridManager } from "aibroker";
+import type { HybridSession } from "aibroker";
 
 /**
  * Create the top-level message handler function used by `watch()`.
@@ -329,7 +329,8 @@ export function createMessageHandler(
         "/s — List sessions",
         "/N — Switch to session N",
         "/N name — Switch & rename",
-        "/n path — Open Claude in directory",
+        "/n path — New headless session",
+        "/nv path — New visual session (iTerm2)",
         "/t [cmd] — Open terminal tab",
         "/r N — Restart Claude in session N",
         "/e N — End session (close tab)",
@@ -354,19 +355,37 @@ export function createMessageHandler(
       return;
     }
 
-    // --- /n <path> (aliases: /new, /relocate) — open Claude in directory ----
+    // --- /nv <path> — new visual (iTerm2) session ----
+    const nvMatch = trimmedText.match(/^\/nv\s+(.+)$/);
+    if (nvMatch) {
+      const targetPath = nvMatch[1].trim();
+      if (targetPath && hybridManager) {
+        const newSessionId = handleRelocate(targetPath);
+        if (newSessionId) {
+          const name = basename(targetPath);
+          hybridManager.registerVisualSession(name, targetPath, newSessionId);
+          setActiveSessionId(newSessionId);
+          setActiveItermSessionId(newSessionId);
+          log(`/nv: created visual session "${name}" (iTerm2=${newSessionId})`);
+          watcherSendMessage(`New visual session: *${name}* (${targetPath})`).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // --- /n <path> (aliases: /new, /relocate) — new headless (API) session ----
     const relocateMatch = trimmedText.match(/^\/(?:n|new|relocate)\s+(.+)$/);
     if (relocateMatch) {
       const targetPath = relocateMatch[1].trim();
       if (targetPath) {
-        const backend = router.defaultBackend;
-        if (backend instanceof APIBackend) {
+        if (hybridManager) {
           const name = basename(targetPath);
-          const session = backend.createSession(name, targetPath);
-          log(`/n API mode: created session "${session.name}" (${session.id}) cwd=${session.cwd}`);
+          const session = hybridManager.createApiSession(name, targetPath);
+          log(`/n: created API session "${session.name}" (${session.id}) cwd=${session.cwd}`);
           watcherSendMessage(`New session: *${session.name}* (${session.cwd})`).catch(() => {});
           return;
         }
+        // Fallback: visual session if no hybrid manager
         const newSessionId = handleRelocate(targetPath);
         if (newSessionId) {
           setActiveSessionId(newSessionId);
@@ -381,19 +400,9 @@ export function createMessageHandler(
 
     // --- /sessions (aliases: /s) — list sessions ------------------------------
     if (trimmedText === "/sessions" || trimmedText === "/s") {
-      const backend = router.defaultBackend;
-      if (backend instanceof APIBackend) {
-        const sessions = backend.listSessions();
-        if (sessions.length === 0) {
-          watcherSendMessage("No API sessions. Use /n <path> to create one.").catch(() => {});
-          return;
-        }
-        const lines = sessions.map((s: APISession, i: number) => {
-          const isActive = s.id === backend.activeSessionId;
-          const cwdDisplay = s.cwd ? ` (${s.cwd})` : "";
-          return `${isActive ? "*" : " "}${i + 1}. ${s.name}${cwdDisplay}`;
-        });
-        watcherSendMessage(lines.join("\n")).catch(() => {});
+      if (hybridManager) {
+        const list = hybridManager.formatSessionList();
+        watcherSendMessage(list).catch(() => {});
         return;
       }
 
@@ -439,22 +448,25 @@ export function createMessageHandler(
       const num = parseInt(sessionSwitchMatch[1], 10);
       const newName = sessionSwitchMatch[2]?.trim() || null;
 
-      const backend = router.defaultBackend;
-      if (backend instanceof APIBackend) {
-        const session = backend.getSessionByIndex(num);
+      if (hybridManager) {
+        const session = hybridManager.switchToIndex(num);
         if (!session) {
-          const count = backend.listSessions().length;
+          const count = hybridManager.listSessions().length;
           watcherSendMessage(`Invalid session number. Use /s to list (1-${count}).`).catch(() => {});
           return;
         }
-        backend.activeSessionId = session.id;
-        log(`/N API mode: switched active session to "${session.name}" (${session.id})`);
-        watcherSendMessage(`Switched to *${session.name}*`).catch(() => {});
+        // For visual sessions, also update iTerm2 active session
+        if (session.kind === "visual") {
+          setActiveSessionId(session.backendSessionId);
+          setActiveItermSessionId(session.backendSessionId);
+        }
+        log(`/N: switched to ${session.kind} session "${session.name}" (${session.id})`);
+        const tag = session.kind === "api" ? " [api]" : " [visual]";
+        watcherSendMessage(`Switched to *${session.name}*${tag}`).catch(() => {});
         return;
       }
 
-      // Use the cached list from the last /s call (valid for 60s) so the
-      // session numbers match what was displayed. Fall back to a fresh call.
+      // Legacy fallback (no hybrid manager)
       const CACHE_TTL_MS = 60_000;
       const sessions =
         cachedSessionList && (Date.now() - cachedSessionListTime < CACHE_TTL_MS)
@@ -489,7 +501,6 @@ end tell`;
         setActiveSessionId(chosen.id);
         setActiveItermSessionId(chosen.id);
 
-        // Also update activeClientId to the registered session for this iTerm2 session
         const regEntry = [...sessionRegistry.values()].find(
           (e) => e.itermSessionId === chosen.id
         );
@@ -497,12 +508,10 @@ end tell`;
           setActiveClientId(regEntry.sessionId);
           log(`/sessions: activeClientId -> ${regEntry.sessionId} ("${regEntry.name}")`);
         } else {
-          // Clear stale activeClientId so it doesn't conflict with activeItermSessionId
           setActiveClientId(null);
           log(`/sessions: activeClientId cleared (no registry entry for ${chosen.id})`);
         }
 
-        // If a new name was provided, persist it as a session variable and update registry
         if (newName) {
           setItermSessionVar(chosen.id, newName);
           setItermTabName(chosen.id, newName);
@@ -549,9 +558,15 @@ end tell`;
 
     // --- /ss, /screenshot — capture and send iTerm2 window screenshot ---------
     if (trimmedText === "/ss" || trimmedText === "/screenshot") {
-      const backend = router.defaultBackend;
-      if (backend instanceof APIBackend) {
-        watcherSendMessage(backend.formatStatus()).catch(() => {});
+      if (hybridManager) {
+        const status = hybridManager.formatActiveStatus();
+        if (status !== null) {
+          // API session → text status
+          watcherSendMessage(status).catch(() => {});
+        } else {
+          // Visual session → screenshot
+          handleScreenshot().catch((err) => log(`/ss: unhandled error — ${err}`));
+        }
         return;
       }
       handleScreenshot().catch((err) => {
@@ -560,14 +575,17 @@ end tell`;
       return;
     }
 
-    // --- /c — send /clear then "go" to active Claude session ----------------
+    // --- /c — clear active session context ----------------
     if (trimmedText === "/c") {
-      const backend = router.defaultBackend;
-      if (backend instanceof APIBackend) {
-        backend.clearSession();
-        log("/c API mode: cleared active session conversation history");
-        watcherSendMessage("Session cleared.").catch(() => {});
-        return;
+      if (hybridManager) {
+        const active = hybridManager.activeSession;
+        if (active?.kind === "api") {
+          hybridManager.clearActiveSession();
+          log("/c: cleared API session conversation history");
+          watcherSendMessage("Session cleared.").catch(() => {});
+          return;
+        }
+        // Visual session — fall through to iTerm2 /clear + go
       }
 
       ensureActiveSession();
@@ -637,6 +655,11 @@ end tell`;
       trimmedText === "/right" ||
       /^\/pick\s+(\d+)$/.test(trimmedText)
     ) {
+      // Keyboard commands require a visual session
+      if (hybridManager?.activeSession?.kind === "api") {
+        watcherSendMessage("Keyboard commands need a visual session. Use /nv to create one.").catch(() => {});
+        return;
+      }
       ensureActiveSession();
       if (!activeItermSessionId) {
         watcherSendMessage("No active session.").catch(() => {});
@@ -751,21 +774,25 @@ end tell`;
     const endMatch = trimmedText.match(/^\/(?:end|e)\s+(\d+)$/);
     if (endMatch) {
       const num = parseInt(endMatch[1], 10);
-      const backend = router.defaultBackend;
-      if (backend instanceof APIBackend) {
-        const session = backend.getSessionByIndex(num);
+
+      if (hybridManager) {
+        const session = hybridManager.getByIndex(num);
         if (!session) {
-          const count = backend.listSessions().length;
+          const count = hybridManager.listSessions().length;
           watcherSendMessage(`Invalid session number. Use /s to list (1-${count}).`).catch(() => {});
           return;
         }
-        const ended = backend.endSession(session.id);
-        if (ended) {
-          log(`/e API mode: ended session "${session.name}" (${session.id})`);
-          watcherSendMessage(`Ended session *${session.name}*.`).catch(() => {});
-        } else {
-          watcherSendMessage("Failed to end session.").catch(() => {});
+        // For visual sessions, also close the iTerm2 tab
+        if (session.kind === "visual") {
+          const itermSessions = getSessionList();
+          const target = itermSessions.find(s => s.id === session.backendSessionId);
+          if (target) {
+            handleEndSession(target).catch((err) => log(`/e: error closing visual tab — ${err}`));
+          }
         }
+        hybridManager.removeByIndex(num);
+        log(`/e: ended ${session.kind} session "${session.name}" (${session.id})`);
+        watcherSendMessage(`Ended session *${session.name}*.`).catch(() => {});
         return;
       }
 
@@ -802,18 +829,18 @@ end tell`;
       textToDeliver = `[${tag}] ${text}`;
     }
 
-    // Check if router has an API backend — if so, deliver via subprocess
-    // and send the response directly back to WhatsApp (no iTerm2 needed).
-    const backend = router.defaultBackend;
-    if (backend instanceof APIBackend) {
-      deliverViaApi(backend, textToDeliver, backend.activeSessionId, {
+    // Route based on active session kind
+    const activeHybrid = hybridManager?.activeSession;
+    if (activeHybrid?.kind === "api") {
+      // Headless delivery via Claude subprocess
+      deliverViaApi(hybridManager!.apiBackend, textToDeliver, activeHybrid.backendSessionId, {
         sendText: (text) => watcherSendMessage(text),
         sendVoice: (buffer, transcript) => watcherSendVoiceBuffer(buffer, transcript),
       });
       return;
     }
 
-    // Deliver to iTerm2 (session backend — default)
+    // Visual session or no hybrid manager — deliver to iTerm2
     const delivered = deliverMessage(textToDeliver);
 
     // Show typing indicator so the user sees Claude is processing.
