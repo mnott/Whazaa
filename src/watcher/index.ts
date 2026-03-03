@@ -61,6 +61,7 @@ import { setAppDir, loadSessionRegistry } from "./persistence.js";
 import { log, setLogPrefix } from "./log.js";
 import { startWsGateway, stopWsGateway, setScreenshotHandler } from "./ws-gateway.js";
 import { handleScreenshot } from "./screenshot.js";
+import { router, APIBackend, SessionBackend } from "aibroker";
 
 // --- Main loop ---------------------------------------------------------------
 
@@ -85,8 +86,28 @@ export async function watch(rawSessionId?: string): Promise<void> {
   // Keep module-level activeItermSessionId in sync with the local activeSessionId
   setActiveItermSessionId(activeSessionId);
 
+  // Select backend based on AIBROKER_BACKEND env var
+  const backendMode = process.env.AIBROKER_BACKEND ?? "session";
+  if (backendMode === "api") {
+    router.setDefaultBackend(new APIBackend({
+      type: "api",
+      provider: "anthropic",
+      model: process.env.AIBROKER_MODEL ?? "sonnet",
+      cwd: process.env.AIBROKER_CWD,
+      maxTurns: Number(process.env.AIBROKER_MAX_TURNS) || 30,
+      maxBudgetUsd: Number(process.env.AIBROKER_MAX_BUDGET) || 1.0,
+      permissionMode: process.env.AIBROKER_PERMISSION_MODE ?? "acceptEdits",
+    }));
+  } else {
+    router.setDefaultBackend(new SessionBackend({
+      type: "session",
+      command: "claude",
+    }));
+  }
+
   console.log(`Whazaa Watch`);
   console.log(`  Session:  ${activeSessionId || "(auto-discover)"}`);
+  console.log(`  Backend:  ${router.defaultBackend?.name ?? "none"} (${backendMode})`);
   console.log(`  Socket:   ${IPC_SOCKET_PATH}`);
   console.log();
 
