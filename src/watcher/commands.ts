@@ -83,7 +83,7 @@ import {
   createClaudeSession,
 } from "./iterm-sessions.js";
 import { handleScreenshot } from "./screenshot.js";
-import { watcherSendMessage, watcherSendVoice } from "./send.js";
+import { watcherSendMessage, watcherSendVoiceBuffer } from "./send.js";
 import {
   runAppleScript,
   findClaudeSession,
@@ -99,7 +99,7 @@ import {
 } from "./iterm-core.js";
 import { startTypingIndicator } from "./typing.js";
 import { log } from "./log.js";
-import { router, APIBackend } from "aibroker";
+import { router, APIBackend, deliverViaApi } from "aibroker";
 import type { APISession } from "aibroker";
 
 /**
@@ -551,25 +551,7 @@ end tell`;
     if (trimmedText === "/ss" || trimmedText === "/screenshot") {
       const backend = router.defaultBackend;
       if (backend instanceof APIBackend) {
-        const sessions = backend.listSessions();
-        const active = sessions.find(s => s.id === backend.activeSessionId);
-        const lines = [
-          `*API Mode Status*`,
-          `Model: ${backend.model}`,
-          `Sessions: ${sessions.length}`,
-          ``,
-        ];
-        for (const s of sessions) {
-          const isActive = s.id === backend.activeSessionId;
-          const age = Date.now() - s.lastActive;
-          const ago = age < 60_000 ? `${Math.round(age / 1000)}s ago`
-            : age < 3_600_000 ? `${Math.round(age / 60_000)}m ago`
-            : `${Math.round(age / 3_600_000)}h ago`;
-          const ctx = s.claudeSessionId ? "has context" : "fresh";
-          lines.push(`${isActive ? "*" : " "}${s.name} (${s.cwd})`);
-          lines.push(`  ${ctx}, last active ${ago}`);
-        }
-        watcherSendMessage(lines.join("\n")).catch(() => {});
+        watcherSendMessage(backend.formatStatus()).catch(() => {});
         return;
       }
       handleScreenshot().catch((err) => {
@@ -822,24 +804,11 @@ end tell`;
 
     // Check if router has an API backend — if so, deliver via subprocess
     // and send the response directly back to WhatsApp (no iTerm2 needed).
-    // Uses the backend's active session ID for context persistence across messages.
     const backend = router.defaultBackend;
-    if (backend?.type === "api") {
-      const activeApiSessionId = (backend instanceof APIBackend)
-        ? backend.activeSessionId
-        : "whazaa-default";
-      const isVoiceMessage = textToDeliver.includes(":voice]");
-      log(`API backend active (${backend.name}) — delivering via subprocess (session: ${activeApiSessionId}, voice: ${isVoiceMessage})`);
-      backend.deliver(textToDeliver, activeApiSessionId).then((response) => {
-        if (response) {
-          const sendFn = isVoiceMessage ? watcherSendVoice : watcherSendMessage;
-          sendFn(response).catch((err) => {
-            log(`Failed to send API backend response: ${err}`);
-          });
-        }
-      }).catch((err) => {
-        log(`API backend deliver error: ${err}`);
-        watcherSendMessage(`Error: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
+    if (backend instanceof APIBackend) {
+      deliverViaApi(backend, textToDeliver, backend.activeSessionId, {
+        sendText: (text) => watcherSendMessage(text),
+        sendVoice: (buffer, transcript) => watcherSendVoiceBuffer(buffer, transcript),
       });
       return;
     }
