@@ -21,6 +21,7 @@
 import { watcherSock, watcherStatus, sentMessageIds } from "./state.js";
 import { resolveRecipient, markdownToWhatsApp, trackContact } from "./contacts.js";
 import { stopTypingIndicator } from "./typing.js";
+import { broadcastText } from "./ws-gateway.js";
 
 export async function watcherSendMessage(message: string, recipient?: string): Promise<string> {
   if (!watcherSock) {
@@ -34,6 +35,11 @@ export async function watcherSendMessage(message: string, recipient?: string): P
   }
 
   const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+
+  // Broadcast to connected PAILot clients (self-chat only)
+  if (targetJid === watcherStatus.selfJid) {
+    broadcastText(message);
+  }
 
   // Stop the typing indicator before sending — Claude is done thinking.
   stopTypingIndicator();

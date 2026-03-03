@@ -44,6 +44,7 @@ import {
 } from "./state.js";
 import { watcherSendMessage } from "./send.js";
 import { listClaudeSessions } from "./iterm-sessions.js";
+import { broadcastImage } from "./ws-gateway.js";
 
 /**
  * Locked-screen fallback for the `/ss` command.
@@ -216,10 +217,9 @@ end tell`;
  *   caught and reported to the user via WhatsApp.
  */
 export async function handleScreenshot(): Promise<void> {
-  // Ack immediately so the user knows we're working on it
-  await watcherSendMessage("Capturing screenshot...").catch(() => {});
-
-  // Check if the screen is locked — screencapture silently fails when locked.
+  // Check if the screen is locked FIRST — screencapture silently fails when locked.
+  // Don't send ack before this check to avoid duplicate messages when falling
+  // back to text capture.
   try {
     const lockCheck = spawnSync(
       "sh",
@@ -235,6 +235,9 @@ export async function handleScreenshot(): Promise<void> {
   } catch {
     // If the check itself fails, proceed and let screencapture surface any error.
   }
+
+  // Ack only for graphic screenshots (lock check passed)
+  await watcherSendMessage("Capturing screenshot...").catch(() => {});
 
   const filePath = join(tmpdir(), `whazaa-screenshot-${Date.now()}.png`);
 
@@ -382,6 +385,9 @@ end tell`;
     execSync(`screencapture -x -R ${bounds} "${filePath}"`, { timeout: 15_000 });
 
     const buffer = readFileSync(filePath);
+
+    // Broadcast to connected PAILot clients
+    broadcastImage(buffer, "Screenshot");
 
     if (!watcherSock) {
       throw new Error("WhatsApp socket not initialized.");

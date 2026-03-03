@@ -1,39 +1,17 @@
 /**
- * ipc-client.ts — MCP server side of the IPC bridge
+ * ipc-client.ts — Whazaa-flavoured WatcherClient.
  *
- * WatcherClient connects to the Unix Domain Socket served by watch.ts and
- * exposes typed methods that mirror the IPC protocol. The MCP tools call
- * these methods instead of talking to whatsapp.ts directly.
- *
- * If the watcher is not running, every method rejects with a clear error
- * so the MCP tool can return a helpful message to the caller.
+ * Wraps AIBroker's WatcherClient (which requires a socket path), pins it to
+ * the Whazaa socket, and provides typed result interfaces for MCP tool code.
  */
 
-import { connect, Socket } from "node:net";
-import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
-import { basename } from "node:path";
+import { WatcherClient as AIBrokerClient } from "aibroker";
 
 // ---------------------------------------------------------------------------
-// Protocol types
+// Socket path — used by both client (here) and server (ipc-server.ts)
 // ---------------------------------------------------------------------------
 
 export const IPC_SOCKET_PATH = "/tmp/whazaa-watcher.sock";
-
-interface IpcRequest {
-  id: string;
-  sessionId: string;
-  itermSessionId?: string;
-  method: string;
-  params: Record<string, unknown>;
-}
-
-interface IpcResponse {
-  id: string;
-  ok: boolean;
-  result?: Record<string, unknown>;
-  error?: string;
-}
 
 // ---------------------------------------------------------------------------
 // Result types (mirrors watcher handler return shapes)
@@ -172,268 +150,94 @@ export interface DictateResult {
 // Client
 // ---------------------------------------------------------------------------
 
-/**
- * Thin IPC proxy that forwards tool calls to the watcher over a Unix
- * Domain Socket. Each call opens a fresh connection, sends one NDJSON
- * request, reads the response, and closes. This keeps the client stateless
- * and avoids connection management complexity.
- */
 export class WatcherClient {
-  private readonly sessionId: string;
+  private readonly client: AIBrokerClient;
 
   constructor() {
-    // Use TERM_SESSION_ID set by iTerm2, or fall back to a stable placeholder.
-    this.sessionId = process.env.TERM_SESSION_ID ?? "unknown-session";
+    this.client = new AIBrokerClient(IPC_SOCKET_PATH);
   }
 
-  /** The iTerm2 session ID this client is associated with */
   get session(): string {
-    return this.sessionId;
+    return this.client.session;
   }
-
-  /**
-   * Human-readable name derived from the current working directory.
-   * Used as the default session name when registering.
-   */
-  private get defaultName(): string {
-    const cwd = process.cwd();
-    const home = homedir();
-    if (cwd === home) return "Home";
-    return basename(cwd);
-  }
-
-  // -------------------------------------------------------------------------
-  // Public tool methods
-  // -------------------------------------------------------------------------
 
   async register(name?: string): Promise<RegisterResult> {
-    const params: Record<string, unknown> = {
-      name: name ?? this.defaultName,
-    };
-    // Pass ITERM_SESSION_ID if available so the watcher can skip the AppleScript scan
-    const itermSessionId = process.env.ITERM_SESSION_ID;
-    if (itermSessionId) {
-      params.itermSessionId = itermSessionId;
-    }
-    const result = await this.call("register", params);
-    return result as unknown as RegisterResult;
+    return this.client.register(name) as Promise<unknown> as Promise<RegisterResult>;
   }
 
   async rename(name: string): Promise<RenameResult> {
-    const result = await this.call("rename", { name });
-    return result as unknown as RenameResult;
+    return this.client.rename(name) as Promise<unknown> as Promise<RenameResult>;
   }
 
   async status(): Promise<StatusResult> {
-    const result = await this.call("status", {});
-    return result as unknown as StatusResult;
+    return this.client.status() as Promise<unknown> as Promise<StatusResult>;
   }
 
   async send(message: string, recipient?: string): Promise<SendResult> {
-    const params: Record<string, unknown> = { message };
-    if (recipient !== undefined) params.recipient = recipient;
-    const result = await this.call("send", params);
-    return result as unknown as SendResult;
+    return this.client.send(message, recipient) as Promise<unknown> as Promise<SendResult>;
   }
 
   async receive(from?: string): Promise<ReceiveResult> {
-    const params: Record<string, unknown> = {};
-    if (from !== undefined) params.from = from;
-    const result = await this.call("receive", params);
-    return result as unknown as ReceiveResult;
+    return this.client.receive(from) as Promise<unknown> as Promise<ReceiveResult>;
   }
 
   async contacts(search?: string, limit?: number): Promise<ContactsResult> {
-    const params: Record<string, unknown> = {};
-    if (search !== undefined) params.search = search;
-    if (limit !== undefined) params.limit = limit;
-    const result = await this.call("contacts", params);
-    return result as unknown as ContactsResult;
+    return this.client.contacts(search, limit) as Promise<unknown> as Promise<ContactsResult>;
   }
 
   async chats(params?: { search?: string; limit?: number }): Promise<ChatsResult> {
-    const ipcParams: Record<string, unknown> = {};
-    if (params?.search !== undefined) ipcParams.search = params.search;
-    if (params?.limit !== undefined) ipcParams.limit = params.limit;
-    const result = await this.call("chats", ipcParams);
-    return result as unknown as ChatsResult;
+    return this.client.chats(params?.search, params?.limit) as Promise<unknown> as Promise<ChatsResult>;
   }
 
   async wait(timeoutMs: number): Promise<WaitResult> {
-    const result = await this.call("wait", { timeoutMs });
-    return result as unknown as WaitResult;
+    return this.client.wait(timeoutMs) as Promise<unknown> as Promise<WaitResult>;
   }
 
   async login(): Promise<LoginResult> {
-    const result = await this.call("login", {});
-    return result as unknown as LoginResult;
+    return this.client.login() as Promise<unknown> as Promise<LoginResult>;
   }
 
   async history(params: { jid: string; count?: number }): Promise<HistoryResult> {
-    const ipcParams: Record<string, unknown> = { jid: params.jid };
-    if (params.count !== undefined) ipcParams.count = params.count;
-    const result = await this.call("history", ipcParams);
-    return result as unknown as HistoryResult;
+    return this.client.history(params) as Promise<unknown> as Promise<HistoryResult>;
   }
 
   async tts(params: { text: string; voice?: string; jid?: string }): Promise<TtsResult> {
-    const ipcParams: Record<string, unknown> = { text: params.text };
-    if (params.voice !== undefined) ipcParams.voice = params.voice;
-    if (params.jid !== undefined) ipcParams.jid = params.jid;
-    const result = await this.call("tts", ipcParams);
-    return result as unknown as TtsResult;
+    return this.client.tts(params) as Promise<unknown> as Promise<TtsResult>;
   }
 
   async voiceConfig(action: "get" | "set", updates?: Record<string, unknown>): Promise<VoiceConfigResult> {
-    const params: Record<string, unknown> = { action, ...updates };
-    const result = await this.call("voice_config", params);
-    return result as unknown as VoiceConfigResult;
+    return this.client.voiceConfig(action, updates) as Promise<unknown> as Promise<VoiceConfigResult>;
   }
 
   async sendFile(filePath: string, recipient?: string, caption?: string, prettify?: boolean): Promise<SendFileResult> {
-    const params: Record<string, unknown> = { filePath };
-    if (recipient !== undefined) params.recipient = recipient;
-    if (caption !== undefined) params.caption = caption;
-    if (prettify !== undefined) params.prettify = prettify;
-    const result = await this.call("send_file", params);
-    return result as unknown as SendFileResult;
+    return this.client.sendFile(filePath, recipient, caption, prettify) as Promise<unknown> as Promise<SendFileResult>;
   }
 
   async speak(text: string, voice?: string): Promise<SpeakResult> {
-    const params: Record<string, unknown> = { text };
-    if (voice !== undefined) params.voice = voice;
-    const result = await this.call("speak", params);
-    return result as unknown as SpeakResult;
+    return this.client.speak(text, voice) as Promise<unknown> as Promise<SpeakResult>;
   }
 
   async discover(): Promise<DiscoverResult> {
-    const result = await this.call("discover", {});
-    return result as unknown as DiscoverResult;
+    return this.client.discover() as Promise<unknown> as Promise<DiscoverResult>;
   }
 
   async sessions(): Promise<SessionListResult> {
-    const result = await this.call("sessions", {});
-    return result as unknown as SessionListResult;
+    return this.client.sessions() as Promise<unknown> as Promise<SessionListResult>;
   }
 
   async switchSession(target: string): Promise<SwitchResult> {
-    const result = await this.call("switch", { target });
-    return result as unknown as SwitchResult;
+    return this.client.switchSession(target) as Promise<unknown> as Promise<SwitchResult>;
   }
 
   async endSession(target: string): Promise<EndSessionResult> {
-    const result = await this.call("end_session", { target });
-    return result as unknown as EndSessionResult;
+    return this.client.endSession(target) as Promise<unknown> as Promise<EndSessionResult>;
   }
 
   async command(text: string): Promise<CommandResult> {
-    const result = await this.call("command", { text });
-    return result as unknown as CommandResult;
+    return this.client.command(text) as Promise<unknown> as Promise<CommandResult>;
   }
 
   async dictate(maxDuration?: number): Promise<DictateResult> {
-    const params: Record<string, unknown> = {};
-    if (maxDuration !== undefined) params.maxDuration = maxDuration;
-    const result = await this.call("dictate", params);
-    return result as unknown as DictateResult;
-  }
-
-  // -------------------------------------------------------------------------
-  // Internal transport
-  // -------------------------------------------------------------------------
-
-  /**
-   * Send a single IPC request and wait for the response.
-   * Opens a new socket connection per call — simple and reliable.
-   *
-   * The per-call timeout is 310 seconds (slightly over the max 'wait' timeout
-   * of 300 seconds) so we never cut off a legitimate long-poll response.
-   */
-  private call(
-    method: string,
-    params: Record<string, unknown>
-  ): Promise<Record<string, unknown>> {
-    return new Promise((resolve, reject) => {
-      let socket: Socket | null = null;
-      let done = false;
-      let buffer = "";
-      let timer: ReturnType<typeof setTimeout> | null = null;
-
-      function finish(err: Error | null, value?: Record<string, unknown>): void {
-        if (done) return;
-        done = true;
-        if (timer !== null) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        try {
-          socket?.destroy();
-        } catch {
-          // ignore
-        }
-        if (err) {
-          reject(err);
-        } else {
-          resolve(value!);
-        }
-      }
-
-      socket = connect(IPC_SOCKET_PATH, () => {
-        const request: IpcRequest = {
-          id: randomUUID(),
-          sessionId: this.sessionId,
-          method,
-          params,
-        };
-        // Include ITERM_SESSION_ID so the watcher can auto-register after restarts
-        const itermId = process.env.ITERM_SESSION_ID;
-        if (itermId) request.itermSessionId = itermId;
-        socket!.write(JSON.stringify(request) + "\n");
-      });
-
-      socket.on("data", (chunk: Buffer) => {
-        buffer += chunk.toString();
-        const nl = buffer.indexOf("\n");
-        if (nl === -1) return;
-
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-
-        let response: IpcResponse;
-        try {
-          response = JSON.parse(line) as IpcResponse;
-        } catch {
-          finish(new Error(`IPC parse error: ${line}`));
-          return;
-        }
-
-        if (!response.ok) {
-          finish(new Error(response.error ?? "IPC call failed"));
-        } else {
-          finish(null, response.result ?? {});
-        }
-      });
-
-      socket.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "ENOENT" || err.code === "ECONNREFUSED") {
-          finish(
-            new Error("Watcher not running. Start it with: npx whazaa watch")
-          );
-        } else {
-          finish(err);
-        }
-      });
-
-      socket.on("end", () => {
-        if (!done) {
-          finish(new Error("IPC connection closed before response"));
-        }
-      });
-
-      // Safety timeout: slightly above the max 'wait' timeout (300 s)
-      timer = setTimeout(() => {
-        finish(new Error("IPC call timed out"));
-      }, 310_000);
-    });
+    return this.client.dictate(maxDuration) as Promise<unknown> as Promise<DictateResult>;
   }
 }
