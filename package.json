@@ -1,6 +1,6 @@
 {
   "name": "whazaa",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "WhatsApp MCP server for Claude Code — talk to Claude from your phone via WhatsApp self-chat",
   "type": "module",
   "main": "dist/index.js",
@@ -41,7 +41,7 @@
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@types/ws": "^8.18.1",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
-    "aibroker": "^0.1.0",
+    "aibroker": "^0.2.6",
     "better-sqlite3": "^12.6.2",
     "kokoro-js": "^1.2.1",
     "pino": "^9.0.0",
