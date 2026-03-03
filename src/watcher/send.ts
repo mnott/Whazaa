@@ -70,6 +70,34 @@ export async function watcherSendMessage(message: string, recipient?: string): P
   return preview;
 }
 
+/** Send a pre-rendered voice buffer to self-chat or a recipient. */
+export async function watcherSendVoiceBuffer(
+  buffer: Buffer,
+  transcript?: string,
+  recipient?: string,
+): Promise<void> {
+  if (!watcherSock) throw new Error("WhatsApp socket not initialized.");
+  if (!watcherStatus.connected) throw new Error("WhatsApp is not connected.");
+  if (!watcherStatus.selfJid) throw new Error("Self JID not yet known.");
+
+  const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+
+  if (targetJid === watcherStatus.selfJid) {
+    broadcastVoice(buffer, transcript ?? "");
+  }
+
+  const result = await watcherSock.sendMessage(targetJid, {
+    audio: buffer,
+    mimetype: "audio/ogg; codecs=opus",
+    ptt: true,
+  });
+
+  if (result?.key?.id) {
+    sentMessageIds.add(result.key.id);
+    setTimeout(() => sentMessageIds.delete(result.key.id!), 30_000);
+  }
+}
+
 /** Send a voice note (TTS) to self-chat or a recipient. Auto-chunks long text. */
 export async function watcherSendVoice(text: string, recipient?: string): Promise<void> {
   if (!watcherSock) throw new Error("WhatsApp socket not initialized.");
