@@ -12,7 +12,7 @@
  */
 
 import { WebSocketServer, WebSocket } from "ws";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { writeFileSync, readFileSync, existsSync, unlinkSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
@@ -27,16 +27,12 @@ import { log } from "./log.js";
 import { WHISPER_BIN, WHISPER_MODEL } from "./media.js";
 import {
   setMessageSource,
-  activeClientId,
   activeItermSessionId,
   setActiveItermSessionId,
-  setActiveClientId,
-  sessionRegistry,
-  cachedSessionList,
-  setCachedSessionList,
 } from "./state.js";
-import { getSessionList, setItermSessionVar, setItermTabName } from "./iterm-sessions.js";
+import { setItermSessionVar, setItermTabName } from "./iterm-sessions.js";
 import { runAppleScript, sendKeystrokeToSession, sendEscapeSequenceToSession } from "./iterm-core.js";
+import { hybridManager } from "aibroker";
 
 const WS_PORT = parseInt(process.env.PAILOT_PORT ?? "8765", 10);
 
@@ -45,6 +41,7 @@ interface WsSession {
   index: number;
   name: string;
   type: "claude" | "terminal";
+  kind: "api" | "visual";
   isActive: boolean;
   id: string;
 }
@@ -70,23 +67,22 @@ export function setScreenshotHandler(handler: () => Promise<void>): void {
 // --- Structured command handling ---
 
 function handleSessionsCommand(ws: WebSocket): void {
-  const allSessions = getSessionList();
-  setCachedSessionList(allSessions, Date.now());
+  if (!hybridManager) {
+    sendTo(ws, { type: "sessions", sessions: [] });
+    return;
+  }
 
-  const sessions: WsSession[] = allSessions.map((s, i) => {
-    const regEntry = [...sessionRegistry.values()].find(
-      (e) => e.itermSessionId === s.id
-    );
-    const label = s.paiName
-      ?? (regEntry ? regEntry.name : null)
-      ?? (s.path ? basename(s.path) : null)
-      ?? s.name;
-    const isActive = activeItermSessionId
-      ? s.id === activeItermSessionId
-      : regEntry ? activeClientId === regEntry.sessionId : false;
+  const hybridSessions = hybridManager.listSessions();
+  const active = hybridManager.activeSession;
 
-    return { index: i + 1, name: label, type: s.type, isActive, id: s.id };
-  });
+  const sessions: WsSession[] = hybridSessions.map((s, i) => ({
+    index: i + 1,
+    name: s.name,
+    type: s.kind === "visual" ? "claude" as const : "claude" as const,
+    kind: s.kind,
+    isActive: active ? s.id === active.id : false,
+    id: s.backendSessionId,
+  }));
 
   const payload = JSON.stringify({ type: "sessions", sessions });
   if (ws.readyState === WebSocket.OPEN) {
@@ -95,75 +91,85 @@ function handleSessionsCommand(ws: WebSocket): void {
 }
 
 function handleSwitchCommand(ws: WebSocket, args: Record<string, unknown>): void {
+  const sessionIndex = args.index as number | undefined;
   const sessionId = args.sessionId as string | undefined;
   const newName = args.name as string | undefined;
 
-  if (!sessionId) {
-    sendTo(ws, { type: "error", message: "Missing sessionId" });
+  if (!hybridManager) {
+    sendTo(ws, { type: "error", message: "No session manager" });
     return;
   }
 
-  const escapedSessionId = sessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  const focusScript = `
-tell application "iTerm2"
+  // Resolve which session to switch to (prefer index, fall back to sessionId lookup)
+  let targetIndex: number | undefined;
+  if (sessionIndex) {
+    targetIndex = sessionIndex;
+  } else if (sessionId) {
+    const sessions = hybridManager.listSessions();
+    const idx = sessions.findIndex(s => s.backendSessionId === sessionId);
+    if (idx >= 0) targetIndex = idx + 1;
+  }
+
+  if (!targetIndex) {
+    sendTo(ws, { type: "error", message: "Missing session index or ID" });
+    return;
+  }
+
+  const session = hybridManager.switchToIndex(targetIndex);
+  if (!session) {
+    sendTo(ws, { type: "error", message: "Session not found — it may have closed." });
+    return;
+  }
+
+  // For visual sessions, also focus the iTerm2 tab
+  if (session.kind === "visual") {
+    setActiveItermSessionId(session.backendSessionId);
+    const escapedId = session.backendSessionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    runAppleScript(`tell application "iTerm2"
   repeat with aWindow in windows
     repeat with aTab in tabs of aWindow
       repeat with aSession in sessions of aTab
-        if id of aSession is "${escapedSessionId}" then
+        if id of aSession is "${escapedId}" then
           select aSession
           return "focused"
         end if
       end repeat
     end repeat
   end repeat
-  return "not_found"
-end tell`;
-
-  const result = runAppleScript(focusScript);
-  if (result === "focused") {
-    setActiveItermSessionId(sessionId);
-
-    const regEntry = [...sessionRegistry.values()].find(
-      (e) => e.itermSessionId === sessionId
-    );
-    if (regEntry) {
-      setActiveClientId(regEntry.sessionId);
-    } else {
-      setActiveClientId(null);
-    }
-
-    if (newName) {
-      setItermSessionVar(sessionId, newName);
-      setItermTabName(sessionId, newName);
-      if (regEntry) regEntry.name = newName;
-    }
-
-    const displayName = newName
-      ?? regEntry?.name
-      ?? sessionId.slice(0, 8);
-
-    sendTo(ws, { type: "session_switched", name: displayName, sessionId });
-    log(`[PAILot] switched to session ${sessionId} (${displayName})`);
-  } else {
-    sendTo(ws, { type: "error", message: "Session not found — it may have closed." });
+end tell`);
   }
+
+  if (newName) {
+    session.name = newName;
+    if (session.kind === "visual") {
+      setItermSessionVar(session.backendSessionId, newName);
+      setItermTabName(session.backendSessionId, newName);
+    }
+  }
+
+  sendTo(ws, { type: "session_switched", name: session.name, sessionId: session.backendSessionId });
+  log(`[PAILot] switched to ${session.kind} session "${session.name}" (${session.id})`);
 }
 
 function handleRenameCommand(ws: WebSocket, args: Record<string, unknown>): void {
   const sessionId = args.sessionId as string | undefined;
   const name = args.name as string | undefined;
 
-  if (!sessionId || !name) {
+  if (!sessionId || !name || !hybridManager) {
     sendTo(ws, { type: "error", message: "Missing sessionId or name" });
     return;
   }
 
-  setItermSessionVar(sessionId, name);
-  setItermTabName(sessionId, name);
-  const regEntry = [...sessionRegistry.values()].find(
-    (e) => e.itermSessionId === sessionId
-  );
-  if (regEntry) regEntry.name = name;
+  // Find the hybrid session by backendSessionId
+  const sessions = hybridManager.listSessions();
+  const session = sessions.find(s => s.backendSessionId === sessionId);
+  if (session) {
+    session.name = name;
+    if (session.kind === "visual") {
+      setItermSessionVar(sessionId, name);
+      setItermTabName(sessionId, name);
+    }
+  }
 
   sendTo(ws, { type: "session_renamed", sessionId, name });
   log(`[PAILot] renamed session ${sessionId} to "${name}"`);
@@ -172,6 +178,12 @@ function handleRenameCommand(ws: WebSocket, args: Record<string, unknown>): void
 async function handleNavCommand(ws: WebSocket, args: Record<string, unknown>): Promise<void> {
   const key = args.key as string | undefined;
   if (!key) return;
+
+  // Guard: nav commands only work with visual sessions
+  if (hybridManager?.activeSession?.kind === "api") {
+    sendTo(ws, { type: "error", message: "Keyboard commands need a visual session." });
+    return;
+  }
 
   const targetSession = activeItermSessionId;
   if (!targetSession) {
@@ -353,9 +365,17 @@ export function startWsGateway(onMessage: (text: string, timestamp: number) => v
               handleRenameCommand(ws, args);
               return;
             case "screenshot":
-              triggerScreenshotForPailot().catch((err) => {
-                log(`[PAILot] screenshot error: ${err}`);
-              });
+              // For API sessions, send text status instead of screenshot
+              if (hybridManager?.activeSession?.kind === "api") {
+                const status = hybridManager.formatActiveStatus();
+                if (status) {
+                  sendTo(ws, { type: "text", content: status });
+                }
+              } else {
+                triggerScreenshotForPailot().catch((err) => {
+                  log(`[PAILot] screenshot error: ${err}`);
+                });
+              }
               return;
             case "nav":
               handleNavCommand(ws, args).catch((err) => {
