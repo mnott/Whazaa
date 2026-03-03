@@ -1,6 +1,5 @@
 /**
- * Minimal logger — all watcher output goes to stderr (stdout is MCP JSON-RPC).
+ * Re-export shared logger from aibroker.
+ * Whazaa-specific prefix is set via setLogPrefix("whazaa-watch") at startup.
  */
-export function log(msg: string): void {
-  process.stderr.write(`[whazaa-watch] ${msg}\n`);
-}
+export { log, setLogPrefix } from "aibroker";

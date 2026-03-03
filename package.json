@@ -39,12 +39,14 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "@types/ws": "^8.18.1",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "better-sqlite3": "^12.6.2",
     "kokoro-js": "^1.2.1",
     "pino": "^9.0.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
+    "ws": "^8.19.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {

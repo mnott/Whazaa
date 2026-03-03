@@ -106,6 +106,7 @@ import { isItermSessionAlive, runAppleScript, stripItermPrefix, snapshotAllSessi
 import { recordFromMic, transcribeLocalAudio } from "./dictation.js";
 import { log } from "./log.js";
 import type { IpcRequest, IpcResponse, QueuedMessage } from "./types.js";
+import { broadcastText, broadcastVoice } from "./ws-gateway.js";
 
 /**
  * Create and start the Unix Domain Socket IPC server.
@@ -919,6 +920,11 @@ async function handleTts(
 
       const audioBuffer = await textToVoiceNote(chunks[i], ttsVoice);
       totalBytes += audioBuffer.length;
+
+      // Broadcast voice to PAILot clients (self-chat only)
+      if (!ttsRecipient) {
+        broadcastVoice(audioBuffer, chunks[i]);
+      }
 
       const result = await watcherSock!.sendMessage(targetJid, {
         audio: audioBuffer,

@@ -67,6 +67,7 @@ import {
   dispatchIncomingMessage,
   sessionTtyCache,
   updateSessionTtyCache,
+  messageSource,
 } from "./state.js";
 import {
   getSessionList,
@@ -715,18 +716,18 @@ end tell`;
     // Dispatch to IPC clients (additive — does not replace iTerm2 delivery)
     dispatchIncomingMessage(text, timestamp);
 
-    // Prefix non-slash messages with [Whazaa] or [Whazaa:voice] so Claude
-    // knows the message came from WhatsApp and should reply there.
-    // Voice transcripts (starting with "[Voice note]" or "[Audio]") get the
-    // :voice variant so Claude responds with a voice note too.
+    // Prefix non-slash messages with the source tag so Claude knows where
+    // to reply: [Whazaa] for WhatsApp, [PAILot] for the iOS app.
+    // Voice transcripts get the :voice variant so Claude responds with voice.
     // Slash commands (e.g. /exit, /clear) are forwarded verbatim.
+    const tag = messageSource === "pailot" ? "PAILot" : "Whazaa";
     let textToDeliver: string;
     if (trimmedText.startsWith("/")) {
       textToDeliver = text;
     } else if (/^\[(?:Voice note|Audio)\]:/.test(trimmedText)) {
-      textToDeliver = `[Whazaa:voice] ${text}`;
+      textToDeliver = `[${tag}:voice] ${text}`;
     } else {
-      textToDeliver = `[Whazaa] ${text}`;
+      textToDeliver = `[${tag}] ${text}`;
     }
 
     // Deliver to iTerm2 (always)

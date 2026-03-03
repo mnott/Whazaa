@@ -44,6 +44,8 @@
 
 import { unlinkSync } from "node:fs";
 import type { Server } from "node:net";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { IPC_SOCKET_PATH } from "../ipc-client.js";
 
@@ -55,8 +57,10 @@ import {
 import { connectWatcher } from "./baileys.js";
 import { startIpcServer, discoverSessions } from "./ipc-server.js";
 import { createMessageHandler } from "./commands.js";
-import { loadSessionRegistry } from "./persistence.js";
-import { log } from "./log.js";
+import { setAppDir, loadSessionRegistry } from "./persistence.js";
+import { log, setLogPrefix } from "./log.js";
+import { startWsGateway, stopWsGateway, setScreenshotHandler } from "./ws-gateway.js";
+import { handleScreenshot } from "./screenshot.js";
 
 // --- Main loop ---------------------------------------------------------------
 
@@ -72,6 +76,9 @@ import { log } from "./log.js";
  *   When omitted, session auto-discovery runs on the first incoming message.
  */
 export async function watch(rawSessionId?: string): Promise<void> {
+  setLogPrefix("whazaa-watch");
+  setAppDir(join(homedir(), ".whazaa"));
+
   let activeSessionId = rawSessionId
     ? rawSessionId.includes(":") ? rawSessionId.split(":").pop()! : rawSessionId
     : "";
@@ -92,6 +99,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
   const shutdown = (signal: string) => {
     console.log(`\n[whazaa-watch] ${signal} received. Stopping.`);
     if (cleanupWatcher) cleanupWatcher();
+    stopWsGateway();
     if (ipcServer) {
       ipcServer.close();
       try { unlinkSync(IPC_SOCKET_PATH); } catch { /* ignore */ }
@@ -132,6 +140,10 @@ export async function watch(rawSessionId?: string): Promise<void> {
 
   // Start the IPC server
   ipcServer = startIpcServer(triggerLogin);
+
+  // Start WebSocket gateway for PAILot app connections
+  setScreenshotHandler(handleScreenshot);
+  startWsGateway(handleMessage);
 
   // Keep process alive
   await new Promise(() => {});
