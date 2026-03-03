@@ -1,10 +1,12 @@
 ---
 name: setup
 description: >
-  Install and configure Whazaa from a local clone. USE WHEN user says "set up Whazaa",
-  "install Whazaa", "configure Whazaa", "set up WhatsApp integration", OR user has just
-  cloned the repo and asks Claude to get it running. Covers prerequisites, build, MCP
-  config, watcher launchd service, WhatsApp pairing, and post-setup verification.
+  Install and configure Whazaa from a local clone or GitHub URL. USE WHEN user
+  says "set up Whazaa", "install Whazaa", "configure Whazaa", "set up WhatsApp
+  integration", "install from github.com/mnott/Whazaa", "clone Whazaa", OR user
+  has just cloned the repo and asks Claude to get it running. Covers clone (if
+  needed), prerequisites, build, MCP config, watcher launchd service, WhatsApp
+  pairing, and post-setup verification.
 ---
 
 # Whazaa Setup Skill
@@ -30,6 +32,20 @@ The repo path is needed throughout. Determine it before starting:
 REPO="$(pwd)"   # if already in the repo
 # or use the path the user provided
 ```
+
+---
+
+## Step 0: Clone (if applicable)
+
+If the user does NOT already have a local clone, clone first:
+
+```bash
+git clone https://github.com/mnott/Whazaa.git ~/dev/ai/Whazaa
+REPO="$HOME/dev/ai/Whazaa"
+```
+
+Use the user's preferred path if specified, otherwise default to `~/dev/ai/Whazaa`.
+If already in the repo directory, skip this step and set `REPO="$(pwd)"`.
 
 ---
 
@@ -66,6 +82,11 @@ ffmpeg and whisper can be installed after setup if needed.
 cd "$REPO"
 npm install
 ```
+
+This installs all dependencies including **aibroker** (the shared core library)
+from npm. No manual linking or local setup of aibroker is required. If you later
+install Telex (Telegram bridge), it uses the same aibroker package — each project
+installs its own copy independently via npm.
 
 Verify `node_modules` was created. If npm fails, check Node.js version and network access.
 
@@ -269,6 +290,7 @@ messages that arrived while you were offline.
 | Messages not typing into Claude | Verify iTerm2 Automation permission in System Settings > Privacy & Security > Automation |
 | TTS fails with "ffmpeg not found" | `brew install ffmpeg` |
 | MCP server disconnects repeatedly | `pkill -f "whazaa"` then let Claude Code restart it |
+| `Cannot find module 'aibroker'` | `npm install` was not run or failed — re-run Step 2 |
 | iTerm2 Automation dialog appeared | Click OK; if you clicked "Don't Allow", grant permission manually in System Settings |
 
 ---

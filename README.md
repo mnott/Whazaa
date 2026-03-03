@@ -37,6 +37,33 @@ The separation means you can have multiple Claude Code sessions open simultaneou
 
 ---
 
+## Architecture
+
+Whazaa is built on [aibroker](https://www.npmjs.com/package/aibroker) — a shared
+core library that provides the platform-independent infrastructure:
+
+```
+aibroker (shared core — installed automatically via npm)
+├── Logging, session state, message queuing
+├── File persistence (parameterized data directory)
+├── Unix Domain Socket IPC (server + client)
+├── macOS iTerm2 adapter (AppleScript, tab management)
+├── Kokoro TTS (local speech synthesis + Whisper transcription)
+└── SessionBackend (deliver messages by typing into iTerm2)
+
+Whazaa (this package)        Telex (Telegram bridge)
+├── Baileys connection        ├── GramJS MTProto connection
+├── WhatsApp formatting       ├── Telegram formatting
+├── MCP tools (whatsapp_*)    ├── MCP tools (telegram_*)
+└── Desktop DB integration    └── ...
+```
+
+If you install multiple bridges (Whazaa + Telex), each has its own
+`node_modules/` — no conflicts. They share the same iTerm2 session
+infrastructure at runtime through macOS AppleScript.
+
+---
+
 ## Quick start
 
 Tell Claude Code:
@@ -652,6 +679,7 @@ The Kokoro model (~160 MB) is downloaded on first use and cached locally. Subseq
 ## Requirements
 
 - Node.js >= 18
+- [aibroker](https://www.npmjs.com/package/aibroker) — shared core (installed automatically)
 - WhatsApp account (any — multi-device support is standard)
 - macOS with [iTerm2](https://iterm2.com/) for the `watch` command and iTerm2 delivery
 - [ffmpeg](https://ffmpeg.org/) for TTS voice note sending (`whatsapp_tts`)
