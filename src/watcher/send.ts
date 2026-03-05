@@ -52,8 +52,8 @@ export async function watcherSendMessage(
 
   const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
 
-  // Broadcast to connected PAILot clients (self-chat only)
-  if ((options?.broadcast ?? true) && targetJid === watcherStatus.selfJid) {
+  // Broadcast to PAILot only when NOT originating from WhatsApp (channel isolation)
+  if ((options?.broadcast ?? true) && messageSource !== "whatsapp" && targetJid === watcherStatus.selfJid) {
     broadcastText(message);
   }
 
@@ -99,7 +99,7 @@ export async function watcherSendVoiceBuffer(
 
   const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
 
-  if (targetJid === watcherStatus.selfJid) {
+  if (messageSource !== "whatsapp" && targetJid === watcherStatus.selfJid) {
     broadcastVoice(buffer, transcript ?? "");
   }
 
@@ -139,7 +139,7 @@ export async function watcherSendVoice(text: string, recipient?: string): Promis
       continue;
     }
 
-    if (targetJid === watcherStatus.selfJid) {
+    if (messageSource !== "whatsapp" && targetJid === watcherStatus.selfJid) {
       broadcastVoice(audioBuffer, chunks[i]);
     }
 
