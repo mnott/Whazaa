@@ -72,3 +72,12 @@ export function setWatcherStatus(status: typeof watcherStatus): void {
   watcherStatus = status;
 }
 
+// ── Adapter stats (for MessengerAdapter health interface) ──
+
+export const adapterStats = {
+  messagesReceived: 0,
+  messagesSent: 0,
+  errors: 0,
+  lastMessageAt: null as number | null,
+};
+
