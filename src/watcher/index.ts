@@ -61,7 +61,7 @@ import { createMessageHandler } from "./commands.js";
 import { setAppDir, loadSessionRegistry } from "./persistence.js";
 import { log, setLogPrefix } from "./log.js";
 import { handleScreenshot } from "./screenshot.js";
-import { router, APIBackend, SessionBackend, HybridSessionManager, setHybridManager, snapshotAllSessions, startWsGateway, stopWsGateway, setScreenshotHandler } from "aibroker";
+import { router, APIBackend, SessionBackend, HybridSessionManager, setHybridManager, snapshotAllSessions, startWsGateway, stopWsGateway, setScreenshotHandler, WatcherClient, DAEMON_SOCKET_PATH } from "aibroker";
 
 // --- Main loop ---------------------------------------------------------------
 
@@ -176,6 +176,17 @@ export async function watch(rawSessionId?: string): Promise<void> {
   // Start WebSocket gateway for PAILot app connections
   setScreenshotHandler(handleScreenshot);
   startWsGateway(handleMessage);
+
+  // Optional: register with the AIBroker hub daemon (fire-and-forget)
+  const hubClient = new WatcherClient(DAEMON_SOCKET_PATH);
+  hubClient.call_raw("register_adapter", {
+    name: "whazaa",
+    socketPath: IPC_SOCKET_PATH,
+  }).then(() => {
+    log("Registered with AIBroker hub daemon");
+  }).catch(() => {
+    // Hub daemon not running — embedded mode, perfectly fine
+  });
 
   // Keep process alive
   await new Promise(() => {});

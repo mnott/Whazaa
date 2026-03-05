@@ -87,7 +87,7 @@ import {
   markdownToWhatsApp,
   MIME_MAP,
 } from "./contacts.js";
-import { watcherSendMessage } from "./send.js";
+import { watcherSendMessage, watcherSendVoice } from "./send.js";
 import { stopTypingIndicator } from "./typing.js";
 import {
   loadVoiceConfig,
@@ -1369,6 +1369,88 @@ async function handleRequest(
     sock.end();
   }
 
+  /**
+   * deliver — Hub calls this to deliver a routed BrokerMessage.
+   *
+   * Maps BrokerMessage types to existing send functions:
+   *   text    -> watcherSendMessage
+   *   voice   -> watcherSendVoice (via tts handler path)
+   *   command -> commandHandler
+   *   file    -> send_file logic (future)
+   */
+  async function handleDeliver(sock: Socket, reqId: string, p: Record<string, unknown>): Promise<void> {
+    const msg = p.message as Record<string, unknown> | undefined;
+    if (!msg || !msg.type) {
+      sendResponse(sock, { id: reqId, ok: false, error: "Invalid BrokerMessage" });
+      sock.end();
+      return;
+    }
+
+    const type = String(msg.type);
+    const payload = (msg.payload ?? {}) as Record<string, unknown>;
+    const text = payload.text != null ? String(payload.text) : "";
+    const recipient = payload.recipient != null ? String(payload.recipient) : undefined;
+    const channel = payload.channel != null ? String(payload.channel) : undefined;
+    const timestamp = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
+
+    log(`IPC: deliver type=${type} from=${msg.source} text=${text.slice(0, 60)}`);
+
+    // Set channel-based message source for routing
+    const prevSource = messageSource;
+    if (channel) setMessageSource(channel);
+
+    try {
+      switch (type) {
+        case "text": {
+          if (!text) {
+            sendResponse(sock, { id: reqId, ok: false, error: "payload.text is required for text delivery" });
+            sock.end();
+            return;
+          }
+          const preview = await watcherSendMessage(text, recipient);
+          sendResponse(sock, { id: reqId, ok: true, result: { delivered: true, preview } });
+          break;
+        }
+
+        case "voice": {
+          if (!text) {
+            sendResponse(sock, { id: reqId, ok: false, error: "payload.text is required for voice delivery" });
+            sock.end();
+            return;
+          }
+          await watcherSendVoice(text, recipient);
+          sendResponse(sock, { id: reqId, ok: true, result: { delivered: true, type: "voice" } });
+          break;
+        }
+
+        case "command": {
+          if (!text) {
+            sendResponse(sock, { id: reqId, ok: false, error: "payload.text is required for command delivery" });
+            sock.end();
+            return;
+          }
+          if (!commandHandler) {
+            sendResponse(sock, { id: reqId, ok: false, error: "Command handler not initialized" });
+            sock.end();
+            return;
+          }
+          await commandHandler(text, timestamp);
+          sendResponse(sock, { id: reqId, ok: true, result: { delivered: true, type: "command" } });
+          break;
+        }
+
+        default:
+          sendResponse(sock, { id: reqId, ok: false, error: `Unsupported deliver type: ${type}` });
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      sendResponse(sock, { id: reqId, ok: false, error: errMsg });
+    } finally {
+      if (channel) setMessageSource(prevSource);
+      sock.end();
+    }
+  }
+
   switch (method) {
     case "register":     return handleRegister(request, socket, id, sessionId, params);
     case "rename":       return handleRename(socket, id, sessionId, params);
@@ -1391,6 +1473,7 @@ async function handleRequest(
     case "end_session":  return handleEndSessionIpc(socket, id, params);
     case "dictate":      return handleDictate(socket, id, sessionId, params);
     case "broadcast_status": return handleBroadcastStatus(socket, id, params);
+    case "deliver":      return handleDeliver(socket, id, params);
     default:
       sendResponse(socket, { id, ok: false, error: `Unknown method: ${method}` });
       socket.end();
