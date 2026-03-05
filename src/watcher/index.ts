@@ -158,8 +158,10 @@ export async function watch(rawSessionId?: string): Promise<void> {
   router.setDefaultBackend(apiBackend);
 
   // ── Detect hub mode ──
-  const hubMode = await detectHubMode();
+  let hubMode = await detectHubMode();
   const hubClient = hubMode ? new WatcherClient(DAEMON_SOCKET_PATH) : null;
+  let hubFailures = 0;
+  const HUB_FAILURE_THRESHOLD = 3; // Fall back to embedded after N consecutive failures
 
   console.log(`Whazaa Watch`);
   console.log(`  Session:  ${activeSessionId || "(auto-discover)"}`);
@@ -227,10 +229,17 @@ export async function watch(rawSessionId?: string): Promise<void> {
 
         hubClient.call_raw("route_message", {
           message: message as unknown as Record<string, unknown>,
+        }).then(() => {
+          hubFailures = 0; // Reset on success
         }).catch((err) => {
-          // Hub delivery failed — fall back to local handling
-          log(`Hub route_message failed, falling back to local: ${err instanceof Error ? err.message : String(err)}`);
+          hubFailures++;
+          log(`Hub route_message failed (${hubFailures}/${HUB_FAILURE_THRESHOLD}), falling back to local: ${err instanceof Error ? err.message : String(err)}`);
           handleMessage(body, timestamp);
+          // Permanently degrade to embedded mode after threshold
+          if (hubFailures >= HUB_FAILURE_THRESHOLD) {
+            log("Hub unreachable — switching to embedded mode permanently for this session");
+            hubMode = false;
+          }
         });
       } else {
         // Embedded mode: handle everything locally (unchanged)
