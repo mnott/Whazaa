@@ -564,12 +564,12 @@ end tell`;
           // API session → text status
           watcherSendMessage(status).catch(() => {});
         } else {
-          // Visual session → screenshot
-          handleScreenshot().catch((err) => log(`/ss: unhandled error — ${err}`));
+          // Visual session → screenshot (route to requesting channel only)
+          handleScreenshot(messageSource).catch((err) => log(`/ss: unhandled error — ${err}`));
         }
         return;
       }
-      handleScreenshot().catch((err) => {
+      handleScreenshot(messageSource).catch((err) => {
         log(`/ss: unhandled error — ${err}`);
       });
       return;
@@ -819,9 +819,12 @@ end tell`;
     // to reply: [Whazaa] for WhatsApp, [PAILot] for the iOS app.
     // Voice transcripts get the :voice variant so Claude responds with voice.
     // Slash commands (e.g. /exit, /clear) are forwarded verbatim.
+    // Messages starting with "!" are delivered verbatim (no tag prefix).
     const tag = messageSource === "pailot" ? "PAILot" : "Whazaa";
     let textToDeliver: string;
-    if (trimmedText.startsWith("/")) {
+    if (trimmedText.startsWith("!")) {
+      textToDeliver = text.replace(/^!/, "");
+    } else if (trimmedText.startsWith("/")) {
       textToDeliver = text;
     } else if (/^\[(?:Voice note|Audio)\]:/.test(trimmedText)) {
       textToDeliver = `[${tag}:voice] ${text}`;

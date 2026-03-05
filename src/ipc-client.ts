@@ -173,8 +173,8 @@ export class WatcherClient {
     return this.client.status() as Promise<unknown> as Promise<StatusResult>;
   }
 
-  async send(message: string, recipient?: string): Promise<SendResult> {
-    return this.client.send(message, recipient) as Promise<unknown> as Promise<SendResult>;
+  async send(message: string, recipient?: string, channel?: string): Promise<SendResult> {
+    return this.client.send(message, recipient, channel) as Promise<unknown> as Promise<SendResult>;
   }
 
   async receive(from?: string): Promise<ReceiveResult> {
@@ -201,7 +201,7 @@ export class WatcherClient {
     return this.client.history(params) as Promise<unknown> as Promise<HistoryResult>;
   }
 
-  async tts(params: { text: string; voice?: string; jid?: string }): Promise<TtsResult> {
+  async tts(params: { text: string; voice?: string; jid?: string; channel?: string }): Promise<TtsResult> {
     return this.client.tts(params) as Promise<unknown> as Promise<TtsResult>;
   }
 
@@ -239,5 +239,9 @@ export class WatcherClient {
 
   async dictate(maxDuration?: number): Promise<DictateResult> {
     return this.client.dictate(maxDuration) as Promise<unknown> as Promise<DictateResult>;
+  }
+
+  async broadcastStatus(status: string): Promise<{ status: string }> {
+    return this.client.broadcastStatus(status) as Promise<unknown> as Promise<{ status: string }>;
   }
 }

@@ -314,7 +314,7 @@ export async function connectWatcher(
           const msg = isReconnect
             ? "Whazaa reconnected (WhatsApp dropped the connection)."
             : "Whazaa watcher started.";
-          watcherSendMessage(msg).catch(() => {});
+          watcherSendMessage(msg, undefined, { broadcast: false }).catch(() => {});
         }).catch(() => {});
       }
 

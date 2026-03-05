@@ -81,7 +81,9 @@ const server = new McpServer(
       "|--------|--------|------------|",
       "| `[Whazaa]` | Text message from WhatsApp | `whatsapp_send` (text reply) |",
       "| `[Whazaa:voice]` | Voice note from WhatsApp (transcribed) | `whatsapp_tts` (voice reply) |",
-      "| _no prefix_ | User typing at the terminal | Terminal only — do NOT send to WhatsApp |",
+      "| `[PAILot]` | Text message from PAILot app | `whatsapp_send` with `channel='pailot'` |",
+      "| `[PAILot:voice]` | Voice note from PAILot app | `whatsapp_tts` with `channel='pailot'` |",
+      "| _no prefix_ | User typing at the terminal | Terminal only — do NOT send to WhatsApp or PAILot |",
       "",
       "### Rules",
       "",
@@ -90,7 +92,7 @@ const server = new McpServer(
       "- **Same content**: send the same response as the terminal — do not shorten or paraphrase.",
       "- **Text formatting**: use **bold** and *italic* only for whatsapp_send. No markdown headers or code blocks.",
       "- **Voice formatting**: NEVER use asterisks or any markdown in whatsapp_tts messages. TTS reads them literally as 'asterisk'. Write plain conversational text only.",
-      "- **Acknowledge long tasks**: if a [Whazaa] task will take more than a few seconds, immediately send a brief ack via whatsapp_send/whatsapp_tts BEFORE starting work. Never leave WhatsApp silent.",
+      "- **Acknowledge long tasks**: if a [Whazaa] or [PAILot] task will take more than a few seconds, immediately send a brief ack via the matching channel BEFORE starting work. Never leave the client silent.",
       "- **Per-message toggle**: this switches automatically with every message. No manual on/off needed.",
       "",
       "### Companion App Message Detection",
@@ -142,6 +144,7 @@ server.registerTool("whatsapp_send", {
     "Optionally set voice to send the message as a TTS voice note instead of text.",
     "Use voice='true' or voice='default' for the default voice,",
     "or a specific voice name like 'af_heart', 'bm_george', 'af_bella', etc.",
+    "Set channel='pailot' to send ONLY to PAILot (skips WhatsApp).",
   ].join(" "),
   inputSchema: {
     message: z
@@ -160,8 +163,14 @@ server.registerTool("whatsapp_send", {
       .describe(
         "Optional: if set, send message as a TTS voice note using Kokoro. Use 'true' or 'default' for the configured default voice, or a specific voice name like 'bm_george', 'af_bella', 'af_nova'."
       ),
+    channel: z
+      .enum(["whatsapp", "pailot"])
+      .optional()
+      .describe(
+        "Target channel. 'pailot' sends ONLY to PAILot app (skips WhatsApp). Default: 'whatsapp' (sends to WhatsApp + broadcasts to PAILot)."
+      ),
   },
-}, async ({ message, recipient, voice }) => {
+}, async ({ message, recipient, voice, channel }) => {
     try {
       // If voice is requested, delegate to TTS IPC method
       if (voice !== undefined && voice !== "") {
@@ -171,11 +180,12 @@ server.registerTool("whatsapp_send", {
           text: message,
           voice: explicitVoice,
           jid: recipient,
+          channel,
         });
         return { content: [{ type: "text", text: "Sent." }] };
       }
 
-      await watcher.send(message, recipient);
+      await watcher.send(message, recipient, channel);
       return { content: [{ type: "text", text: "Sent." }] };
     } catch (err) {
       return errorResponse(err);
@@ -192,6 +202,7 @@ server.registerTool("whatsapp_tts", {
     "Long messages are automatically split into sequential voice notes at sentence boundaries.",
     "Without a recipient, sends to your own self-chat.",
     "With a recipient, sends to any contact or group.",
+    "Set channel='pailot' to send ONLY to PAILot (skips WhatsApp).",
   ].join(" "),
   inputSchema: {
     message: z
@@ -210,13 +221,20 @@ server.registerTool("whatsapp_tts", {
       .describe(
         "Optional recipient: phone number (e.g. '+41764502698'), WhatsApp JID, or contact name. Omit to send to self-chat."
       ),
+    channel: z
+      .enum(["whatsapp", "pailot"])
+      .optional()
+      .describe(
+        "Target channel. 'pailot' sends ONLY to PAILot app (skips WhatsApp). Default: 'whatsapp'."
+      ),
   },
-}, async ({ message, voice, recipient }) => {
+}, async ({ message, voice, recipient, channel }) => {
     try {
       const result: TtsResult = await watcher.tts({
         text: message,
         voice: voice,
         jid: recipient,
+        channel,
       });
       const chunks = result.chunks ?? 1;
       const msg = chunks > 1 ? `Sent ${chunks} voice notes.` : "Sent.";

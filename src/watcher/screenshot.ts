@@ -44,7 +44,43 @@ import {
 } from "./state.js";
 import { watcherSendMessage } from "./send.js";
 import { listClaudeSessions } from "./iterm-sessions.js";
-import { broadcastImage } from "./ws-gateway.js";
+import { broadcastImage, broadcastText } from "aibroker";
+
+// Cache the terminal buffer from the last screenshot so we can detect unchanged content
+let lastScreenshotContent: string | null = null;
+
+/**
+ * Read the terminal buffer of the currently active iTerm2 session.
+ * Returns null if no session is found or the read fails.
+ */
+function getActiveSessionContent(): string | null {
+  const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
+  const itermId = stripItermPrefix(
+    (activeItermSessionId || undefined) ?? activeEntry?.itermSessionId
+  );
+  if (!itermId) return null;
+
+  const result = spawnSync("osascript", [], {
+    input: `tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if id of s is "${itermId}" then
+          return contents of s
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return ""
+end tell`,
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 10_000,
+  });
+
+  if (result.status !== 0 || result.signal) return null;
+  const stdout = result.stdout?.toString().trim() ?? "";
+  return stdout || null;
+}
 
 /**
  * Locked-screen fallback for the `/ss` command.
@@ -68,7 +104,7 @@ import { broadcastImage } from "./ws-gateway.js";
  *   when an error message has been sent instead). Never rejects — all errors
  *   are caught and reported via WhatsApp.
  */
-export async function handleTextScreenshot(): Promise<void> {
+export async function handleTextScreenshot(source?: string): Promise<void> {
   try {
     // Build a list of candidate iTerm2 session UUIDs to try (best-first order).
     // If the first one is stale (tab closed, process killed), we try the rest.
@@ -93,9 +129,9 @@ export async function handleTextScreenshot(): Promise<void> {
     }
 
     if (candidates.length === 0) {
-      await watcherSendMessage(
-        "Screen is locked and no iTerm2 session found — cannot capture."
-      ).catch(() => {});
+      const errMsg = "Screen is locked and no iTerm2 session found — cannot capture.";
+      if (source !== "whatsapp") broadcastText(errMsg);
+      if (source !== "pailot") await watcherSendMessage(errMsg).catch(() => {});
       return;
     }
 
@@ -149,33 +185,50 @@ end tell`;
         continue;
       }
 
-      // Got content — send it
-      const maxLen = 4000;
-      const trimmed =
-        stdout.length > maxLen
-          ? "...\n" + stdout.slice(-maxLen)
-          : stdout;
+      // Got content — update cache for next comparison
+      lastScreenshotContent = stdout;
 
-      await watcherSendMessage(
-        `*Terminal capture (screen locked):*\n\n\`\`\`\n${trimmed}\n\`\`\``
-      ).catch(() => {});
+      // Route based on source
+      if (source !== "whatsapp") {
+        // PAILot gets last ~50 lines — strip decorative separators and empty lines
+        const cleaned = stdout
+          .split("\n")
+          .filter((line: string) => !/^[─━═┄┈╌╍┅┉]{3,}\s*$/.test(line.trim()))
+          .filter((line: string) => line.trim() !== "")
+          .slice(-50)
+          .join("\n");
+        broadcastText(`Terminal capture (screen locked):\n\n${cleaned}`);
+      }
 
-      log(`/ss: text capture sent via ${candidate.source} (${candidate.id.slice(0, 8)}…)`);
+      if (source !== "pailot") {
+        // WhatsApp keeps 4000 char limit
+        const maxLen = 4000;
+        const trimmed =
+          stdout.length > maxLen
+            ? "...\n" + stdout.slice(-maxLen)
+            : stdout;
+
+        await watcherSendMessage(
+          `*Terminal capture (screen locked):*\n\n\`\`\`\n${trimmed}\n\`\`\``
+        ).catch(() => {});
+      }
+
+      log(`/ss: text capture sent to ${source ?? "both"} via ${candidate.source} (${candidate.id.slice(0, 8)}…)`);
       return;
     }
 
     // All candidates exhausted — report what happened
     const summary = candidates.map((c) => `${c.source}`).join(", ");
     log(`/ss text: all ${candidates.length} candidate(s) failed: ${summary}`);
-    await watcherSendMessage(
-      `Screen is locked — tried ${candidates.length} session(s) but none returned buffer content. Check watcher logs.`
-    ).catch(() => {});
+    const failMsg = `Screen is locked — tried ${candidates.length} session(s) but none returned buffer content. Check watcher logs.`;
+    if (source !== "whatsapp") broadcastText(failMsg);
+    if (source !== "pailot") await watcherSendMessage(failMsg).catch(() => {});
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log(`/ss: text capture error — ${msg}`);
-    await watcherSendMessage(
-      `Screen is locked — text capture failed: ${msg}`
-    ).catch(() => {});
+    const errMsg = `Screen is locked — text capture failed: ${msg}`;
+    if (source !== "whatsapp") broadcastText(errMsg);
+    if (source !== "pailot") await watcherSendMessage(errMsg).catch(() => {});
   }
 }
 
@@ -216,10 +269,35 @@ end tell`;
  *   an error message has been sent instead. Never rejects — all errors are
  *   caught and reported to the user via WhatsApp.
  */
-export async function handleScreenshot(): Promise<void> {
-  // Check if the screen is locked FIRST — screencapture silently fails when locked.
-  // Don't send ack before this check to avoid duplicate messages when falling
-  // back to text capture.
+export async function handleScreenshot(source?: string): Promise<void> {
+  // Check if terminal content is unchanged since last screenshot — if so,
+  // send the last lines as text (instant) instead of doing a full image capture.
+  // This runs BEFORE the lock check so it works for both locked and unlocked screens.
+  const currentContent = getActiveSessionContent();
+  if (currentContent && lastScreenshotContent) {
+    const tail = (s: string) => s.split("\n").slice(-100).join("\n").trim();
+    if (tail(currentContent) === tail(lastScreenshotContent)) {
+      const lines = currentContent
+        .split("\n")
+        .filter((l: string) => !/^[─━═┄┈╌╍┅┉]{3,}\s*$/.test(l.trim()))
+        .filter((l: string) => l.trim() !== "")
+        .slice(-30)
+        .join("\n");
+      if (lines) {
+        if (source !== "whatsapp") broadcastText(lines);
+        if (source !== "pailot") {
+          await watcherSendMessage(
+            `*Terminal (unchanged):*\n\n\`\`\`\n${lines}\n\`\`\``
+          ).catch(() => {});
+        }
+        log("/ss: content unchanged, sent tail as text");
+        return;
+      }
+    }
+  }
+  lastScreenshotContent = currentContent;
+
+  // Check if the screen is locked — screencapture silently fails when locked.
   try {
     const lockCheck = spawnSync(
       "sh",
@@ -229,7 +307,7 @@ export async function handleScreenshot(): Promise<void> {
     const lockCount = parseInt((lockCheck.stdout ?? "0").trim(), 10);
     if (lockCount > 0) {
       log("/ss: screen is locked — falling back to terminal text capture");
-      await handleTextScreenshot();
+      await handleTextScreenshot(source);
       return;
     }
   } catch {
@@ -386,28 +464,32 @@ end tell`;
 
     const buffer = readFileSync(filePath);
 
-    // Broadcast to connected PAILot clients
-    broadcastImage(buffer, "Screenshot");
-
-    if (!watcherSock) {
-      throw new Error("WhatsApp socket not initialized.");
-    }
-    if (!watcherStatus.selfJid) {
-      throw new Error("Self JID not yet known.");
+    // Send to the channel that requested it (or both if source unknown)
+    if (source !== "whatsapp") {
+      broadcastImage(buffer, "Screenshot");
     }
 
-    const result = await watcherSock.sendMessage(watcherStatus.selfJid, {
-      image: buffer,
-      caption: "Screenshot",
-    });
+    if (source !== "pailot") {
+      if (!watcherSock) {
+        throw new Error("WhatsApp socket not initialized.");
+      }
+      if (!watcherStatus.selfJid) {
+        throw new Error("Self JID not yet known.");
+      }
 
-    if (result?.key?.id) {
-      const id = result.key.id;
-      sentMessageIds.add(id);
-      setTimeout(() => sentMessageIds.delete(id), 30_000);
+      const result = await watcherSock.sendMessage(watcherStatus.selfJid, {
+        image: buffer,
+        caption: "Screenshot",
+      });
+
+      if (result?.key?.id) {
+        const id = result.key.id;
+        sentMessageIds.add(id);
+        setTimeout(() => sentMessageIds.delete(id), 30_000);
+      }
     }
 
-    log("/ss: screenshot sent successfully");
+    log(`/ss: screenshot sent to ${source ?? "both"}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log(`/ss: error — ${msg}`);

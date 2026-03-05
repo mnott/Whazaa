@@ -53,15 +53,15 @@ import {
   activeItermSessionId,
   setActiveItermSessionId,
   setCommandHandler,
+  sessionRegistry,
 } from "./state.js";
 import { connectWatcher } from "./baileys.js";
 import { startIpcServer, discoverSessions } from "./ipc-server.js";
 import { createMessageHandler } from "./commands.js";
 import { setAppDir, loadSessionRegistry } from "./persistence.js";
 import { log, setLogPrefix } from "./log.js";
-import { startWsGateway, stopWsGateway, setScreenshotHandler } from "./ws-gateway.js";
 import { handleScreenshot } from "./screenshot.js";
-import { router, APIBackend, SessionBackend, HybridSessionManager, setHybridManager } from "aibroker";
+import { router, APIBackend, SessionBackend, HybridSessionManager, setHybridManager, snapshotAllSessions, startWsGateway, stopWsGateway, setScreenshotHandler } from "aibroker";
 
 // --- Main loop ---------------------------------------------------------------
 
@@ -155,6 +155,19 @@ export async function watch(rawSessionId?: string): Promise<void> {
   const disc = discoverSessions();
   if (disc.alive.length > 0 || disc.discovered.length > 0) {
     log(`Startup: ${disc.alive.length} restored, ${disc.discovered.length} discovered, ${disc.pruned.length} pruned`);
+  }
+
+  // Register discovered iTerm2 sessions as visual sessions in the hybrid manager.
+  // Use live iTerm2 tab titles (what the user actually sees) instead of paiName.
+  const liveSnapshots = snapshotAllSessions();
+  const snapById = new Map(liveSnapshots.map(s => [s.id, s]));
+  for (const [, entry] of sessionRegistry) {
+    if (entry.itermSessionId) {
+      const snap = snapById.get(entry.itermSessionId);
+      // Prefer tab.title (user-visible tab label), fall back to profile name, paiName, then registry name
+      const displayName = snap?.tabTitle ?? snap?.profileName ?? snap?.paiName ?? entry.name;
+      manager.registerVisualSession(displayName, "", entry.itermSessionId);
+    }
   }
 
   // Start the IPC server
