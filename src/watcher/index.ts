@@ -115,6 +115,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
 
   const shutdown = (signal: string) => {
     console.log(`\n[whazaa-watch] ${signal} received. Stopping.`);
+    clearInterval(heartbeatTimer);
     if (cleanupWatcher) cleanupWatcher();
     if (ipcServer) {
       ipcServer.close();
@@ -179,6 +180,35 @@ export async function watch(rawSessionId?: string): Promise<void> {
   }).catch((err) => {
     log(`Hub registration failed: ${err instanceof Error ? err.message : String(err)}`);
   });
+
+  // Hub heartbeat — re-register if the daemon restarts
+  const HUB_HEARTBEAT_INTERVAL = 30_000; // 30 seconds
+  const heartbeatTimer = setInterval(async () => {
+    try {
+      const result = await Promise.race([
+        hubClient.call_raw("status", {}),
+        new Promise<null>((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), 5000),
+        ),
+      ]);
+      if (result === null) throw new Error("null response");
+    } catch {
+      // Hub unreachable — try to re-register
+      log("Hub heartbeat failed — attempting re-registration...");
+      try {
+        hubClient.call_raw("register_adapter", {
+          name: "whazaa",
+          socketPath: IPC_SOCKET_PATH,
+        }).then(() => {
+          log("Re-registered with AIBroker hub daemon");
+        }).catch((err) => {
+          log(`Hub re-registration failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      } catch {
+        log("Hub still unreachable");
+      }
+    }
+  }, HUB_HEARTBEAT_INTERVAL);
 
   // Keep process alive
   await new Promise(() => {});
