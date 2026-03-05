@@ -74,6 +74,8 @@ import {
   watcherSock,
   watcherStatus,
   sentMessageIds,
+  messageSource,
+  setMessageSource,
   managedSessions,
   updateSessionTtyCache,
   commandHandler,
@@ -106,7 +108,7 @@ import { isItermSessionAlive, runAppleScript, stripItermPrefix, snapshotAllSessi
 import { recordFromMic, transcribeLocalAudio } from "./dictation.js";
 import { log } from "./log.js";
 import type { IpcRequest, IpcResponse, QueuedMessage } from "./types.js";
-import { broadcastText, broadcastVoice } from "./ws-gateway.js";
+import { broadcastText, broadcastVoice, broadcastStatus } from "aibroker";
 
 /**
  * Create and start the Unix Domain Socket IPC server.
@@ -333,11 +335,16 @@ async function handleSend(
   }
 
   const recipient = params.recipient != null ? String(params.recipient) : undefined;
+  const channel = params.channel != null ? String(params.channel) : undefined;
 
   // Ensure the sender has a queue even if not yet registered
   if (!clientQueues.has(sessionId)) {
     clientQueues.set(sessionId, []);
   }
+
+  // Route to the requested channel (pailot = broadcast only, skip WhatsApp)
+  const prevSource = messageSource;
+  if (channel === "pailot") setMessageSource("pailot");
 
   try {
     const preview = await watcherSendMessage(message, recipient);
@@ -346,6 +353,8 @@ async function handleSend(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sendResponse(socket, { id, ok: false, error: msg });
+  } finally {
+    if (channel === "pailot") setMessageSource(prevSource);
   }
   socket.end();
 }
@@ -906,8 +915,12 @@ async function handleTts(
   // Use explicitly-provided voice, or fall back to configured defaultVoice
   const ttsVoice = params.voice != null ? String(params.voice) : loadVoiceConfig().defaultVoice;
   const ttsRecipient = params.jid != null ? String(params.jid) : undefined;
+  const ttsChannel = params.channel != null ? String(params.channel) : undefined;
+  const prevTtsSource = messageSource;
+  if (ttsChannel === "pailot") setMessageSource("pailot");
+  const pailotOnly = (messageSource === "pailot") && !ttsRecipient;
 
-  if (!requireConnection(socket, id)) return;
+  if (!pailotOnly && !requireConnection(socket, id)) return;
 
   const targetJid = ttsRecipient ? resolveRecipient(ttsRecipient) : watcherStatus.selfJid!;
 
@@ -920,6 +933,11 @@ async function handleTts(
 
       const audioBuffer = await textToVoiceNote(chunks[i], ttsVoice);
       totalBytes += audioBuffer.length;
+
+      if (pailotOnly) {
+        broadcastVoice(audioBuffer, chunks[i]);
+        continue;
+      }
 
       // Broadcast voice to PAILot clients (self-chat only)
       if (!ttsRecipient) {
@@ -957,6 +975,8 @@ async function handleTts(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sendResponse(socket, { id, ok: false, error: msg });
+  } finally {
+    if (ttsChannel === "pailot") setMessageSource(prevTtsSource);
   }
   socket.end();
 }
@@ -1335,6 +1355,20 @@ async function handleRequest(
     saveSessionRegistry();
   }
 
+  // --- broadcast_status handler (for hooks to signal compaction etc.) ---
+  function handleBroadcastStatus(sock: Socket, reqId: string, p: Record<string, unknown>): void {
+    const st = p.status != null ? String(p.status) : "";
+    if (!st) {
+      sendResponse(sock, { id: reqId, ok: false, error: "status is required" });
+      sock.end();
+      return;
+    }
+    broadcastStatus(st);
+    log(`IPC: broadcast_status → ${st}`);
+    sendResponse(sock, { id: reqId, ok: true, result: { status: st } });
+    sock.end();
+  }
+
   switch (method) {
     case "register":     return handleRegister(request, socket, id, sessionId, params);
     case "rename":       return handleRename(socket, id, sessionId, params);
@@ -1356,6 +1390,7 @@ async function handleRequest(
     case "switch":       return handleSwitch(socket, id, params);
     case "end_session":  return handleEndSessionIpc(socket, id, params);
     case "dictate":      return handleDictate(socket, id, sessionId, params);
+    case "broadcast_status": return handleBroadcastStatus(socket, id, params);
     default:
       sendResponse(socket, { id, ok: false, error: `Unknown method: ${method}` });
       socket.end();

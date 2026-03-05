@@ -30,11 +30,14 @@ export {
   clientWaiters,
   contactMessageQueues,
   sentMessageIds,
+  messageSource,
+  setMessageSource,
   dispatchIncomingMessage,
   enqueueContactMessage,
   commandHandler,
   setCommandHandler,
 } from "aibroker";
+export type { MessageSource } from "aibroker";
 
 // ── WhatsApp-specific: Contact directory ──
 // Uses Whazaa's ContactEntry (jid, phoneNumber) — NOT aibroker's generic one
@@ -69,11 +72,3 @@ export function setWatcherStatus(status: typeof watcherStatus): void {
   watcherStatus = status;
 }
 
-// ── WhatsApp-specific: Message source (prefix routing: [Whazaa] vs [PAILot]) ──
-
-export type MessageSource = "whatsapp" | "pailot";
-export let messageSource: MessageSource = "whatsapp";
-
-export function setMessageSource(src: MessageSource): void {
-  messageSource = src;
-}

@@ -18,16 +18,28 @@
  * Dependencies: state.ts, contacts.ts, typing.ts.
  */
 
-import { watcherSock, watcherStatus, sentMessageIds } from "./state.js";
+import { watcherSock, watcherStatus, sentMessageIds, messageSource } from "./state.js";
 import { resolveRecipient, markdownToWhatsApp, trackContact } from "./contacts.js";
 import { stopTypingIndicator } from "./typing.js";
-import { broadcastText, broadcastVoice } from "./ws-gateway.js";
 import { textToVoiceNote } from "../tts.js";
-import { splitIntoChunks } from "aibroker";
+import { broadcastText, broadcastVoice, splitIntoChunks } from "aibroker";
 import { loadVoiceConfig } from "./persistence.js";
 import { log } from "./log.js";
 
-export async function watcherSendMessage(message: string, recipient?: string): Promise<string> {
+export async function watcherSendMessage(
+  message: string,
+  recipient?: string,
+  options?: { broadcast?: boolean },
+): Promise<string> {
+  const preview = message.length > 80 ? `${message.slice(0, 80)}...` : message;
+
+  // PAILot-originated self-chat: broadcast to PAILot only, skip WhatsApp
+  if (messageSource === "pailot" && !recipient) {
+    if (options?.broadcast !== false) broadcastText(message);
+    stopTypingIndicator();
+    return preview;
+  }
+
   if (!watcherSock) {
     throw new Error("WhatsApp socket not initialized. Is the watcher connected?");
   }
@@ -41,7 +53,7 @@ export async function watcherSendMessage(message: string, recipient?: string): P
   const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
 
   // Broadcast to connected PAILot clients (self-chat only)
-  if (targetJid === watcherStatus.selfJid) {
+  if ((options?.broadcast ?? true) && targetJid === watcherStatus.selfJid) {
     broadcastText(message);
   }
 
@@ -66,7 +78,6 @@ export async function watcherSendMessage(message: string, recipient?: string): P
     trackContact(targetJid, null, Date.now());
   }
 
-  const preview = message.length > 80 ? `${message.slice(0, 80)}...` : message;
   return preview;
 }
 
@@ -76,6 +87,12 @@ export async function watcherSendVoiceBuffer(
   transcript?: string,
   recipient?: string,
 ): Promise<void> {
+  // PAILot-originated self-chat: broadcast only, skip WhatsApp
+  if (messageSource === "pailot" && !recipient) {
+    broadcastVoice(buffer, transcript ?? "");
+    return;
+  }
+
   if (!watcherSock) throw new Error("WhatsApp socket not initialized.");
   if (!watcherStatus.connected) throw new Error("WhatsApp is not connected.");
   if (!watcherStatus.selfJid) throw new Error("Self JID not yet known.");
@@ -100,11 +117,15 @@ export async function watcherSendVoiceBuffer(
 
 /** Send a voice note (TTS) to self-chat or a recipient. Auto-chunks long text. */
 export async function watcherSendVoice(text: string, recipient?: string): Promise<void> {
-  if (!watcherSock) throw new Error("WhatsApp socket not initialized.");
-  if (!watcherStatus.connected) throw new Error("WhatsApp is not connected.");
-  if (!watcherStatus.selfJid) throw new Error("Self JID not yet known.");
+  const pailotOnly = messageSource === "pailot" && !recipient;
 
-  const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+  if (!pailotOnly) {
+    if (!watcherSock) throw new Error("WhatsApp socket not initialized.");
+    if (!watcherStatus.connected) throw new Error("WhatsApp is not connected.");
+    if (!watcherStatus.selfJid) throw new Error("Self JID not yet known.");
+  }
+
+  const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid!;
   const voice = loadVoiceConfig().defaultVoice;
   const chunks = splitIntoChunks(text);
 
@@ -113,11 +134,16 @@ export async function watcherSendVoice(text: string, recipient?: string): Promis
 
     const audioBuffer = await textToVoiceNote(chunks[i], voice);
 
+    if (pailotOnly) {
+      broadcastVoice(audioBuffer, chunks[i]);
+      continue;
+    }
+
     if (targetJid === watcherStatus.selfJid) {
       broadcastVoice(audioBuffer, chunks[i]);
     }
 
-    const result = await watcherSock.sendMessage(targetJid, {
+    const result = await watcherSock!.sendMessage(targetJid, {
       audio: audioBuffer,
       mimetype: "audio/ogg; codecs=opus",
       ptt: true,
@@ -129,5 +155,5 @@ export async function watcherSendVoice(text: string, recipient?: string): Promis
     }
   }
 
-  log(`Voice sent (${chunks.length} chunk${chunks.length > 1 ? "s" : ""}) to ${targetJid}`);
+  log(`Voice sent (${chunks.length} chunk${chunks.length > 1 ? "s" : ""}) to ${pailotOnly ? "pailot" : targetJid}`);
 }
