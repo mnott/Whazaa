@@ -61,13 +61,67 @@ import { createMessageHandler } from "./commands.js";
 import { setAppDir, loadSessionRegistry } from "./persistence.js";
 import { log, setLogPrefix } from "./log.js";
 import { handleScreenshot } from "./screenshot.js";
-import { router, APIBackend, SessionBackend, HybridSessionManager, setHybridManager, snapshotAllSessions, startWsGateway, stopWsGateway, setScreenshotHandler, WatcherClient, DAEMON_SOCKET_PATH } from "aibroker";
+import { router, APIBackend, SessionBackend, HybridSessionManager, setHybridManager, snapshotAllSessions, startWsGateway, stopWsGateway, setScreenshotHandler, WatcherClient, DAEMON_SOCKET_PATH, createBrokerMessage } from "aibroker";
+
+// ── Hub mode detection ───────────────────────────────────────────────────────
+
+/**
+ * Probe the AIBroker hub daemon to determine whether it is running.
+ *
+ * Connects to `/tmp/aibroker.sock` and calls `status`. If the call succeeds
+ * within 2 seconds, the hub is considered alive and Whazaa enters hub mode.
+ * On any failure (socket missing, refused, timeout), returns false and
+ * Whazaa falls back to embedded mode (current behavior unchanged).
+ */
+async function detectHubMode(): Promise<boolean> {
+  const client = new WatcherClient(DAEMON_SOCKET_PATH);
+  try {
+    const result = await Promise.race([
+      client.call_raw("status", {}),
+      new Promise<null>((_, reject) => setTimeout(() => reject(new Error("timeout")), 2000)),
+    ]);
+    return result !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Slash commands that must be handled locally even in hub mode.
+ *
+ * These commands require direct iTerm2/Baileys access that only the Whazaa
+ * process has. They should never be forwarded to the hub.
+ */
+const LOCAL_SLASH_COMMANDS = new Set([
+  "/h", "/help",
+  "/cc", "/esc", "/enter", "/tab",
+  "/up", "/down", "/left", "/right",
+  "/restart", "/login",
+]);
+
+/** Check if a message matches a local-only slash command. */
+function isLocalSlashCommand(text: string): boolean {
+  const trimmed = text.trim();
+  // Exact matches
+  if (LOCAL_SLASH_COMMANDS.has(trimmed)) return true;
+  // /pick N pattern
+  if (/^\/pick\s+\d+/.test(trimmed)) return true;
+  return false;
+}
 
 // --- Main loop ---------------------------------------------------------------
 
 /**
  * Start the Whazaa watcher — the long-running process that bridges WhatsApp
  * and iTerm2 Claude Code sessions.
+ *
+ * Supports two modes:
+ * - **Hub mode**: AIBroker daemon is running. Whazaa acts as a thin transport
+ *   adapter — incoming WA messages are forwarded to the hub for routing.
+ *   PAILot gateway is NOT started (hub owns it). Outgoing messages arrive
+ *   via the `deliver` IPC handler (Phase 2).
+ * - **Embedded mode**: No daemon. Whazaa runs everything locally (current
+ *   behavior, fully backward compatible).
  *
  * Suspends the event loop indefinitely via `await new Promise(() => {})`;
  * exits only on SIGINT or SIGTERM.
@@ -103,10 +157,15 @@ export async function watch(rawSessionId?: string): Promise<void> {
   // Set APIBackend as default for backward-compat (deliverViaApi reads it)
   router.setDefaultBackend(apiBackend);
 
+  // ── Detect hub mode ──
+  const hubMode = await detectHubMode();
+  const hubClient = hubMode ? new WatcherClient(DAEMON_SOCKET_PATH) : null;
+
   console.log(`Whazaa Watch`);
   console.log(`  Session:  ${activeSessionId || "(auto-discover)"}`);
   console.log(`  Backend:  hybrid (api=${apiBackend.model})`);
   console.log(`  Socket:   ${IPC_SOCKET_PATH}`);
+  console.log(`  Mode:     ${hubMode ? "hub (daemon detected)" : "embedded (standalone)"}`);
   console.log();
 
   let consecutiveFailures = 0;
@@ -118,10 +177,14 @@ export async function watch(rawSessionId?: string): Promise<void> {
   const shutdown = (signal: string) => {
     console.log(`\n[whazaa-watch] ${signal} received. Stopping.`);
     if (cleanupWatcher) cleanupWatcher();
-    stopWsGateway();
+    if (!hubMode) stopWsGateway();
     if (ipcServer) {
       ipcServer.close();
       try { unlinkSync(IPC_SOCKET_PATH); } catch { /* ignore */ }
+    }
+    // Unregister from hub on shutdown
+    if (hubClient) {
+      hubClient.call_raw("unregister_adapter", { name: "whazaa" }).catch(() => {});
     }
     process.exit(0);
   };
@@ -145,7 +208,34 @@ export async function watch(rawSessionId?: string): Promise<void> {
   const { cleanup, triggerLogin } = await connectWatcher(
     (body: string, _msgId: string, timestamp: number) => {
       console.log(`[whazaa-watch] (direct) -> ${body}`);
-      handleMessage(body, timestamp);
+
+      if (hubMode && hubClient) {
+        // Hub mode: forward non-local messages to the hub for routing.
+        // Local slash commands (keyboard, /restart, /help) stay in Whazaa.
+        if (isLocalSlashCommand(body)) {
+          handleMessage(body, timestamp);
+          return;
+        }
+
+        // Create a BrokerMessage and route through the hub
+        const message = createBrokerMessage(
+          "whazaa",
+          body.trim().startsWith("/") ? "command" : "text",
+          { text: body },
+        );
+        message.timestamp = timestamp;
+
+        hubClient.call_raw("route_message", {
+          message: message as unknown as Record<string, unknown>,
+        }).catch((err) => {
+          // Hub delivery failed — fall back to local handling
+          log(`Hub route_message failed, falling back to local: ${err instanceof Error ? err.message : String(err)}`);
+          handleMessage(body, timestamp);
+        });
+      } else {
+        // Embedded mode: handle everything locally (unchanged)
+        handleMessage(body, timestamp);
+      }
     }
   );
   cleanupWatcher = cleanup;
@@ -173,20 +263,24 @@ export async function watch(rawSessionId?: string): Promise<void> {
   // Start the IPC server
   ipcServer = startIpcServer(triggerLogin);
 
-  // Start WebSocket gateway for PAILot app connections
-  setScreenshotHandler(handleScreenshot);
-  startWsGateway(handleMessage);
-
-  // Optional: register with the AIBroker hub daemon (fire-and-forget)
-  const hubClient = new WatcherClient(DAEMON_SOCKET_PATH);
-  hubClient.call_raw("register_adapter", {
-    name: "whazaa",
-    socketPath: IPC_SOCKET_PATH,
-  }).then(() => {
-    log("Registered with AIBroker hub daemon");
-  }).catch(() => {
-    // Hub daemon not running — embedded mode, perfectly fine
-  });
+  if (hubMode && hubClient) {
+    // Hub mode: do NOT start PAILot WsGateway — the hub owns it.
+    // Register with the hub so it can route messages to us.
+    log("Hub mode: skipping WsGateway (hub owns PAILot gateway)");
+    hubClient.call_raw("register_adapter", {
+      name: "whazaa",
+      socketPath: IPC_SOCKET_PATH,
+    }).then(() => {
+      log("Registered with AIBroker hub daemon");
+    }).catch((err) => {
+      log(`Hub registration failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  } else {
+    // Embedded mode: start WsGateway locally (current behavior)
+    setScreenshotHandler(handleScreenshot);
+    startWsGateway(handleMessage);
+    log("Embedded mode: started local WsGateway");
+  }
 
   // Keep process alive
   await new Promise(() => {});
