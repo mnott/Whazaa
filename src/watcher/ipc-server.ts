@@ -37,6 +37,8 @@
  * | `speak`       | Synthesise speech and play it locally via the system speaker. |
  * | `voice_config`| Get or set voice synthesis configuration (voice, modes, personas). |
  * | `discover`    | Prune dead iTerm2 sessions and rediscover sessions by `user.paiName`. |
+ * | `health`      | Return adapter health (status, connectionStatus, stats, lastMessageAgo). |
+ * | `connection_status` | Return current connection status string. |
  *
  * Session auto-registration
  * -------------------------
@@ -79,6 +81,7 @@ import {
   managedSessions,
   updateSessionTtyCache,
   commandHandler,
+  adapterStats,
 } from "./state.js";
 import {
   resolveJid,
@@ -1298,6 +1301,43 @@ function handleCommand(
   socket.end();
 }
 
+// Derive AdapterConnectionStatus from watcherStatus.
+function getConnectionStatus(): "connected" | "connecting" | "disconnected" | "error" {
+  if (watcherStatus.connected) return "connected";
+  if (watcherStatus.awaitingQR) return "connecting";
+  if (watcherSock !== null) return "connecting";
+  return "disconnected";
+}
+
+// Return adapter health (MessengerAdapter.health interface).
+function handleHealth(socket: Socket, id: string): void {
+  const connStatus = getConnectionStatus();
+  const lastMessageAgo = adapterStats.lastMessageAt
+    ? (Date.now() - adapterStats.lastMessageAt) / 1000
+    : null;
+  sendResponse(socket, {
+    id,
+    ok: true,
+    result: {
+      status: connStatus === "connected" ? "ok" : "degraded",
+      connectionStatus: connStatus,
+      stats: { ...adapterStats },
+      lastMessageAgo,
+    },
+  });
+  socket.end();
+}
+
+// Return current connection status only (MessengerAdapter.connectionStatus interface).
+function handleConnectionStatus(socket: Socket, id: string): void {
+  sendResponse(socket, {
+    id,
+    ok: true,
+    result: { status: getConnectionStatus() },
+  });
+  socket.end();
+}
+
 // IPC handler wrapper for discoverSessions.
 function handleDiscover(socket: Socket, id: string): void {
   const result = discoverSessions();
@@ -1472,8 +1512,10 @@ async function handleRequest(
     case "switch":       return handleSwitch(socket, id, params);
     case "end_session":  return handleEndSessionIpc(socket, id, params);
     case "dictate":      return handleDictate(socket, id, sessionId, params);
-    case "broadcast_status": return handleBroadcastStatus(socket, id, params);
-    case "deliver":      return handleDeliver(socket, id, params);
+    case "broadcast_status":    return handleBroadcastStatus(socket, id, params);
+    case "deliver":             return handleDeliver(socket, id, params);
+    case "health":              return handleHealth(socket, id);
+    case "connection_status":   return handleConnectionStatus(socket, id);
     default:
       sendResponse(socket, { id, ok: false, error: `Unknown method: ${method}` });
       socket.end();

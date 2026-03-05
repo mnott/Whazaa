@@ -53,6 +53,7 @@ import {
   setWatcherStatus,
   sentMessageIds,
   enqueueContactMessage,
+  adapterStats,
 } from "./state.js";
 import { loadStoreCache, saveStoreCache } from "./persistence.js";
 import { stopTypingIndicator } from "./typing.js";
@@ -431,6 +432,8 @@ export async function connectWatcher(
             if (sockRef) {
               downloadImageToTemp(msg, sockRef).then((filePath) => {
                 if (!filePath) return;
+                adapterStats.messagesReceived++;
+                adapterStats.lastMessageAt = Date.now();
                 // Deliver image path first, then caption as a separate message
                 if (caption) {
                   onMessage(`${filePath} ${caption}`, msgId, timestamp);
@@ -439,6 +442,7 @@ export async function connectWatcher(
                 }
               }).catch((err) => {
                 log(`Image delivery error: ${err}`);
+                adapterStats.errors++;
               });
             }
           } else if (isAudio) {
@@ -450,9 +454,12 @@ export async function connectWatcher(
             if (sockRef) {
               downloadAudioAndTranscribe(msg, sockRef, duration, isPtt).then((result) => {
                 if (!result) return;
+                adapterStats.messagesReceived++;
+                adapterStats.lastMessageAt = Date.now();
                 onMessage(result, msgId, timestamp);
               }).catch((err) => {
                 log(`Audio delivery error: ${err}`);
+                adapterStats.errors++;
               });
             }
           } else if (isDocument) {
@@ -461,15 +468,20 @@ export async function connectWatcher(
             if (sockRef) {
               downloadDocumentToDownloads(msg, sockRef).then((result) => {
                 if (!result) return;
+                adapterStats.messagesReceived++;
+                adapterStats.lastMessageAt = Date.now();
                 const parts = [`[File]: ${result.path}`];
                 if (result.caption) parts.push(result.caption);
                 onMessage(parts.join(" "), msgId, timestamp);
               }).catch((err) => {
                 log(`Document delivery error: ${err}`);
+                adapterStats.errors++;
               });
             }
           } else {
             // Existing behaviour: deliver to iTerm2 and MCP client queue
+            adapterStats.messagesReceived++;
+            adapterStats.lastMessageAt = Date.now();
             onMessage(body!, msgId, timestamp);
           }
         } else {
@@ -481,6 +493,8 @@ export async function connectWatcher(
               : null);
           trackContact(remoteJidNorm, senderName, timestamp);
           if (body) {
+            adapterStats.messagesReceived++;
+            adapterStats.lastMessageAt = Date.now();
             enqueueContactMessage(remoteJidNorm, body, timestamp);
             log(`Incoming from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${body.slice(0, 60)}`);
           } else if (isAudio) {
@@ -492,10 +506,13 @@ export async function connectWatcher(
             if (sockRef) {
               downloadAudioAndTranscribe(msg, sockRef, duration, isPtt).then((transcript) => {
                 if (!transcript) return;
+                adapterStats.messagesReceived++;
+                adapterStats.lastMessageAt = Date.now();
                 enqueueContactMessage(remoteJidNorm, transcript, timestamp);
                 log(`Transcribed audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${transcript.slice(0, 60)}`);
               }).catch((err) => {
                 log(`Non-self audio transcription error: ${err}`);
+                adapterStats.errors++;
               });
             } else {
               log(`Incoming audio from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""} (no sock, skipping transcription)`);
@@ -505,12 +522,15 @@ export async function connectWatcher(
             if (sockRef) {
               downloadDocumentToDownloads(msg, sockRef).then((result) => {
                 if (!result) return;
+                adapterStats.messagesReceived++;
+                adapterStats.lastMessageAt = Date.now();
                 const parts = [`[File]: ${result.path}`];
                 if (result.caption) parts.push(result.caption);
                 enqueueContactMessage(remoteJidNorm, parts.join(" "), timestamp);
                 log(`Document from ${remoteJidNorm}${senderName ? ` (${senderName})` : ""}: ${result.fileName}`);
               }).catch((err) => {
                 log(`Non-self document download error: ${err}`);
+                adapterStats.errors++;
               });
             }
           } else {

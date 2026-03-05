@@ -18,7 +18,7 @@
  * Dependencies: state.ts, contacts.ts, typing.ts.
  */
 
-import { watcherSock, watcherStatus, sentMessageIds, messageSource } from "./state.js";
+import { watcherSock, watcherStatus, sentMessageIds, messageSource, adapterStats } from "./state.js";
 import { resolveRecipient, markdownToWhatsApp, trackContact } from "./contacts.js";
 import { stopTypingIndicator } from "./typing.js";
 import { textToVoiceNote } from "../tts.js";
@@ -72,6 +72,7 @@ export async function watcherSendMessage(
     sentMessageIds.add(id);
     setTimeout(() => sentMessageIds.delete(id), 30_000);
   }
+  adapterStats.messagesSent++;
 
   // Track outbound contact (non-self only)
   if (targetJid !== watcherStatus.selfJid) {
@@ -113,6 +114,7 @@ export async function watcherSendVoiceBuffer(
     sentMessageIds.add(result.key.id);
     setTimeout(() => sentMessageIds.delete(result.key.id!), 30_000);
   }
+  adapterStats.messagesSent++;
 }
 
 /** Send a voice note (TTS) to self-chat or a recipient. Auto-chunks long text. */
@@ -153,6 +155,7 @@ export async function watcherSendVoice(text: string, recipient?: string): Promis
       sentMessageIds.add(result.key.id);
       setTimeout(() => sentMessageIds.delete(result.key.id!), 30_000);
     }
+    adapterStats.messagesSent++;
   }
 
   log(`Voice sent (${chunks.length} chunk${chunks.length > 1 ? "s" : ""}) to ${pailotOnly ? "pailot" : targetJid}`);
