@@ -186,7 +186,7 @@ export async function watch(rawSessionId?: string): Promise<void> {
   const heartbeatTimer = setInterval(async () => {
     try {
       const result = await Promise.race([
-        hubClient.call_raw("status", {}),
+        hubClient.call_raw("ping", {}),
         new Promise<null>((_, reject) =>
           setTimeout(() => reject(new Error("timeout")), 5000),
         ),
