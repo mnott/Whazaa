@@ -56,7 +56,6 @@ import { createServer, Socket, Server } from "node:net";
 
 import { proto } from "@whiskeysockets/baileys";
 
-import { textToVoiceNote, speakLocally } from "../tts.js";
 import { IPC_SOCKET_PATH } from "../ipc-client.js";
 import { listChats } from "../desktop-db.js";
 
@@ -90,11 +89,9 @@ import {
   markdownToWhatsApp,
   MIME_MAP,
 } from "./contacts.js";
-import { watcherSendMessage, watcherSendVoice } from "./send.js";
+import { watcherSendMessage, watcherSendVoice, watcherSendVoiceBuffer } from "./send.js";
 import { stopTypingIndicator } from "./typing.js";
 import {
-  loadVoiceConfig,
-  saveVoiceConfig,
   saveStoreCache,
   saveSessionRegistry,
 } from "./persistence.js";
@@ -104,14 +101,14 @@ import {
   setItermSessionVar,
   setItermTabName,
   deduplicateName,
-  getSessionList,
-  handleEndSession,
 } from "./iterm-sessions.js";
-import { isItermSessionAlive, runAppleScript, stripItermPrefix, snapshotAllSessions, typeIntoSession } from "./iterm-core.js";
-import { recordFromMic, transcribeLocalAudio } from "./dictation.js";
+import { stripItermPrefix, snapshotAllSessions, typeIntoSession } from "./iterm-core.js";
+import { hybridManager, WatcherClient, broadcastStatus } from "aibroker";
 import { log } from "./log.js";
 import type { IpcRequest, IpcResponse, QueuedMessage } from "./types.js";
-import { broadcastText, broadcastVoice, broadcastStatus } from "aibroker";
+
+// Module-level hub client — set once by startIpcServer, used by TTS/voice proxy handlers.
+let hubClient: WatcherClient | null = null;
 
 /**
  * Create and start the Unix Domain Socket IPC server.
@@ -125,13 +122,17 @@ import { broadcastText, broadcastVoice, broadcastStatus } from "aibroker";
  * @param triggerLoginFn - Async function that initiates a fresh QR pairing
  *   flow; passed through to the `login` IPC handler.  Provided by
  *   `connectWatcher` in `baileys.ts`.
+ * @param hub - Connected WatcherClient for the AIBroker hub daemon. TTS/voice
+ *   handlers proxy their calls through the hub instead of processing locally.
  *
  * @returns The `net.Server` instance so the caller (`watch()` in `index.ts`)
  *   can close it during graceful shutdown.
  */
 export function startIpcServer(
-  triggerLoginFn: () => Promise<void>
+  triggerLoginFn: () => Promise<void>,
+  hub: WatcherClient,
 ): Server {
+  hubClient = hub;
   // Remove stale socket file from a previous run
   if (existsSync(IPC_SOCKET_PATH)) {
     try {
@@ -273,6 +274,17 @@ function handleRegister(
   if (!clientQueues.has(sessionId)) {
     clientQueues.set(sessionId, []);
   }
+  // Also register in hybridManager so PAILot can see it
+  if (itermId && hybridManager) {
+    const alreadyRegistered = hybridManager.listSessions().some(
+      s => s.backendSessionId === itermId
+    );
+    if (!alreadyRegistered) {
+      hybridManager.registerVisualSession(effectiveName, "", itermId);
+      log(`IPC: also registered "${effectiveName}" in hybridManager`);
+    }
+  }
+
   log(`IPC: registered client ${sessionId} (name: "${effectiveName}"${persistedName ? " [restored from iTerm]" : ""}, iTerm: ${itermId ?? "unknown"})`);
   saveSessionRegistry();
   sendResponse(socket, { id, ok: true, result: { registered: true } });
@@ -868,147 +880,65 @@ async function handleHistory(
   socket.end();
 }
 
-// Split text into chunks at natural boundaries for sequential voice notes.
-function splitIntoChunks(text: string, maxLen = 800): string[] {
-  if (text.length <= maxLen) return [text];
-
-  const chunks: string[] = [];
-  // Split on paragraph breaks first
-  const paragraphs = text.split(/\n\n+/);
-
-  let current = "";
-  for (const para of paragraphs) {
-    if (current && (current + "\n\n" + para).length > maxLen) {
-      chunks.push(current.trim());
-      current = "";
-    }
-    if (para.length > maxLen) {
-      // Paragraph too long — split on sentence endings
-      if (current) { chunks.push(current.trim()); current = ""; }
-      const sentences = para.split(/(?<=[.!?])\s+/);
-      for (const sentence of sentences) {
-        if (current && (current + " " + sentence).length > maxLen) {
-          chunks.push(current.trim());
-          current = "";
-        }
-        current = current ? current + " " + sentence : sentence;
-      }
-    } else {
-      current = current ? current + "\n\n" + para : para;
-    }
-  }
-  if (current.trim()) chunks.push(current.trim());
-
-  return chunks.length > 0 ? chunks : [text];
-}
-
 // Convert text to a voice note (Kokoro TTS) and send via WhatsApp.
+// Proxied to the AIBroker hub — the hub generates audio and delivers it
+// back via the "deliver" IPC call so the adapter sends it via WhatsApp.
 async function handleTts(
   socket: Socket,
   id: string,
   params: Record<string, unknown>,
 ): Promise<void> {
-  const ttsText = params.text != null ? String(params.text) : "";
-  if (!ttsText.trim()) {
+  const text = params.text != null ? String(params.text) : "";
+  if (!text.trim()) {
     sendResponse(socket, { id, ok: false, error: "text is required for TTS" });
     socket.end();
     return;
   }
 
-  // Use explicitly-provided voice, or fall back to configured defaultVoice
-  const ttsVoice = params.voice != null ? String(params.voice) : loadVoiceConfig().defaultVoice;
-  const ttsRecipient = params.jid != null ? String(params.jid) : undefined;
-  const ttsChannel = params.channel != null ? String(params.channel) : undefined;
-  const prevTtsSource = messageSource;
-  if (ttsChannel === "pailot") setMessageSource("pailot");
-  const pailotOnly = (messageSource === "pailot") && !ttsRecipient;
+  const voice = params.voice != null ? String(params.voice) : undefined;
+  const recipient = params.jid != null ? String(params.jid) : undefined;
 
-  if (!pailotOnly && !requireConnection(socket, id)) return;
-
-  const targetJid = ttsRecipient ? resolveRecipient(ttsRecipient) : watcherStatus.selfJid!;
+  if (!hubClient) {
+    sendResponse(socket, { id, ok: false, error: "Hub client not available" });
+    socket.end();
+    return;
+  }
 
   try {
-    const chunks = splitIntoChunks(ttsText);
-    let totalBytes = 0;
-
-    for (let i = 0; i < chunks.length; i++) {
-      if (i > 0) await new Promise((r) => setTimeout(r, 1000));
-
-      const audioBuffer = await textToVoiceNote(chunks[i], ttsVoice);
-      totalBytes += audioBuffer.length;
-
-      if (pailotOnly) {
-        broadcastVoice(audioBuffer, chunks[i]);
-        continue;
-      }
-
-      // Broadcast voice to PAILot clients (self-chat only)
-      if (!ttsRecipient) {
-        broadcastVoice(audioBuffer, chunks[i]);
-      }
-
-      const result = await watcherSock!.sendMessage(targetJid, {
-        audio: audioBuffer,
-        mimetype: "audio/ogg; codecs=opus",
-        ptt: true,
-      });
-
-      if (result?.key?.id) {
-        const msgId = result.key.id;
-        sentMessageIds.add(msgId);
-        setTimeout(() => sentMessageIds.delete(msgId), 30_000);
-      }
-    }
-
-    // Track outbound contact (non-self only)
-    if (targetJid !== watcherStatus.selfJid) {
-      trackContact(targetJid, null, Date.now());
-    }
-
-    sendResponse(socket, {
-      id,
-      ok: true,
-      result: {
-        targetJid,
-        voice: ttsVoice ?? process.env.WHAZAA_TTS_VOICE ?? "bm_fable",
-        bytesSent: totalBytes,
-        chunks: chunks.length,
-      },
-    });
+    const result = await hubClient.call_raw("tts", { text, voice, source: "whazaa", recipient });
+    sendResponse(socket, { id, ok: true, result: result ?? { triggered: true } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sendResponse(socket, { id, ok: false, error: msg });
-  } finally {
-    if (ttsChannel === "pailot") setMessageSource(prevTtsSource);
   }
   socket.end();
 }
 
 // Synthesise speech and play it locally via the system speaker.
+// Proxied to the AIBroker hub — the hub owns the TTS pipeline.
 async function handleSpeak(
   socket: Socket,
   id: string,
   params: Record<string, unknown>,
 ): Promise<void> {
-  const speakText = params.text != null ? String(params.text) : "";
-  if (!speakText.trim()) {
+  const text = params.text != null ? String(params.text) : "";
+  if (!text.trim()) {
     sendResponse(socket, { id, ok: false, error: "text is required for speak" });
     socket.end();
     return;
   }
 
-  const speakVoice = params.voice != null ? String(params.voice) : undefined;
+  const voice = params.voice != null ? String(params.voice) : undefined;
+
+  if (!hubClient) {
+    sendResponse(socket, { id, ok: false, error: "Hub client not available" });
+    socket.end();
+    return;
+  }
 
   try {
-    await speakLocally(speakText, speakVoice);
-    sendResponse(socket, {
-      id,
-      ok: true,
-      result: {
-        success: true,
-        voice: speakVoice ?? process.env.WHAZAA_TTS_VOICE ?? "bm_fable",
-      },
-    });
+    const result = await hubClient.call_raw("speak", { text, voice });
+    sendResponse(socket, { id, ok: true, result: result ?? { success: true } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sendResponse(socket, { id, ok: false, error: msg });
@@ -1017,153 +947,107 @@ async function handleSpeak(
 }
 
 // Get or set voice synthesis configuration (voice, modes, personas).
-function handleVoiceConfig(
+// Proxied to the AIBroker hub — the hub owns the voice configuration state.
+async function handleVoiceConfig(
   socket: Socket,
   id: string,
   params: Record<string, unknown>,
-): void {
-  const { action, ...updates } = params as { action?: string } & Record<string, unknown>;
-  if (action === "get") {
-    const config = loadVoiceConfig();
-    sendResponse(socket, { id, ok: true, result: { success: true, config: config as unknown as Record<string, unknown> } });
-  } else if (action === "set") {
-    const config = loadVoiceConfig();
-    if (updates.defaultVoice !== undefined) config.defaultVoice = String(updates.defaultVoice);
-    if (updates.voiceMode !== undefined) config.voiceMode = Boolean(updates.voiceMode);
-    if (updates.localMode !== undefined) config.localMode = Boolean(updates.localMode);
-    if (updates.personas !== undefined && typeof updates.personas === "object" && updates.personas !== null) {
-      config.personas = { ...config.personas, ...(updates.personas as Record<string, string>) };
-    }
-    saveVoiceConfig(config);
-    sendResponse(socket, { id, ok: true, result: { success: true, config: config as unknown as Record<string, unknown> } });
-  } else {
-    sendResponse(socket, { id, ok: true, result: { success: false, error: "Unknown action. Use 'get' or 'set'." } });
+): Promise<void> {
+  if (!hubClient) {
+    sendResponse(socket, { id, ok: false, error: "Hub client not available" });
+    socket.end();
+    return;
+  }
+
+  try {
+    const result = await hubClient.call_raw("voice_config", params);
+    sendResponse(socket, { id, ok: true, result: result ?? { success: true } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendResponse(socket, { id, ok: false, error: msg });
   }
   socket.end();
 }
 
-// Resolve a session target by 1-based index or name substring.
-function resolveSessionTarget(
-  target: string
-): { id: string; name: string; path: string; type: "claude" | "terminal"; paiName: string | null; atPrompt: boolean } | null {
-  const sessions = getSessionList();
-  // Try as 1-based index
-  const num = parseInt(target, 10);
-  if (!isNaN(num) && num >= 1 && num <= sessions.length) {
-    return sessions[num - 1];
+// List all managed sessions — proxied to the hub for centralized session management.
+async function handleSessions(socket: Socket, id: string): Promise<void> {
+  if (!hubClient) {
+    sendResponse(socket, { id, ok: false, error: "Hub client not available" });
+    socket.end();
+    return;
   }
-  // Try as name substring (case-insensitive)
-  const lower = target.toLowerCase();
-  return sessions.find((s) => {
-    const label = s.paiName ?? s.name;
-    return label.toLowerCase().includes(lower);
-  }) ?? null;
-}
-
-// List all managed sessions with index, name, type, and active marker.
-function handleSessions(socket: Socket, id: string): void {
-  const allSessions = getSessionList();
-  const sessions = allSessions.map((s, i) => {
-    const regEntry = [...sessionRegistry.values()].find((e) => e.itermSessionId === s.id);
-    const label = s.paiName ?? (regEntry ? regEntry.name : null) ?? s.name;
-    return {
-      index: i + 1,
-      name: label,
-      type: s.type,
-      active: s.id === activeItermSessionId,
-    };
-  });
-  sendResponse(socket, { id, ok: true, result: { sessions } });
+  try {
+    const result = await hubClient.call_raw("sessions", {});
+    sendResponse(socket, { id, ok: true, result: result ?? { sessions: [] } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendResponse(socket, { id, ok: false, error: msg });
+  }
   socket.end();
 }
 
-// Switch the active iTerm2 session by index or name substring.
-function handleSwitch(socket: Socket, id: string, params: Record<string, unknown>): void {
+// Switch the active session — proxied to the hub for centralized session management.
+async function handleSwitch(socket: Socket, id: string, params: Record<string, unknown>): Promise<void> {
   const target = params.target != null ? String(params.target) : "";
   if (!target) {
     sendResponse(socket, { id, ok: false, error: "target is required (session number or name)" });
     socket.end();
     return;
   }
-  const session = resolveSessionTarget(target);
-  if (!session) {
-    sendResponse(socket, { id, ok: false, error: `No session matching "${target}". Use whatsapp_sessions to list.` });
+  if (!hubClient) {
+    sendResponse(socket, { id, ok: false, error: "Hub client not available" });
     socket.end();
     return;
   }
-
-  // Focus the session in iTerm2 using the same AppleScript pattern as the /N command
-  const escapedId = session.id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  const focusScript = `tell application "iTerm2"
-  repeat with aWindow in windows
-    repeat with aTab in tabs of aWindow
-      repeat with aSession in sessions of aTab
-        if id of aSession is "${escapedId}" then
-          select aSession
-          return "focused"
-        end if
-      end repeat
-    end repeat
-  end repeat
-  return "not_found"
-end tell`;
-
-  const focusResult = runAppleScript(focusScript);
-  if (focusResult === "focused") {
-    setActiveItermSessionId(session.id);
-    const regEntry = [...sessionRegistry.values()].find((e) => e.itermSessionId === session.id);
-    if (regEntry) setActiveClientId(regEntry.sessionId);
-    const label = session.paiName ?? (regEntry ? regEntry.name : null) ?? session.name;
-    saveSessionRegistry();
-    sendResponse(socket, { id, ok: true, result: { switched: true, name: label } });
-  } else {
-    sendResponse(socket, { id, ok: false, error: "Session not found in iTerm2 — it may have closed." });
+  try {
+    const result = await hubClient.call_raw("switch", { target });
+    sendResponse(socket, { id, ok: true, result: result ?? { switched: true } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendResponse(socket, { id, ok: false, error: msg });
   }
   socket.end();
 }
 
 // End a session (close tab + cleanup) by index or name substring.
 /**
- * Record audio from the local mic, transcribe via Whisper, and type the
- * transcript into the caller's iTerm2 session.
+ * Record audio from the local mic and transcribe via the AIBroker hub.
+ * The hub handles recording and transcription; the adapter types the
+ * resulting transcript into the caller's iTerm2 session locally.
  */
 async function handleDictate(socket: Socket, id: string, sessionId: string, params: Record<string, unknown>): Promise<void> {
   const maxDuration = typeof params.maxDuration === "number" ? params.maxDuration : 60;
-  const startMs = Date.now();
 
-  let audioPath: string | undefined;
+  if (!hubClient) {
+    sendResponse(socket, { id, ok: false, error: "Hub client not available" });
+    socket.end();
+    return;
+  }
+
   try {
-    audioPath = await recordFromMic(maxDuration);
-    const transcript = await transcribeLocalAudio(audioPath);
-    const durationMs = Date.now() - startMs;
+    const result = await hubClient.call_raw("dictate", { maxDuration });
+    const transcript = result?.transcript != null ? String(result.transcript) : "";
 
-    if (!transcript) {
-      sendResponse(socket, { id, ok: true, result: { transcript: "", durationMs } });
-      socket.end();
-      return;
+    if (transcript) {
+      // Type transcript into the caller's iTerm2 session — this stays local
+      // because iTerm2 access is adapter-side only.
+      const entry = sessionRegistry.get(sessionId);
+      if (entry?.itermSessionId) {
+        typeIntoSession(entry.itermSessionId, transcript);
+      } else if (activeItermSessionId) {
+        typeIntoSession(activeItermSessionId, transcript);
+      }
     }
 
-    // Type transcript into the caller's iTerm2 session
-    const entry = sessionRegistry.get(sessionId);
-    if (entry?.itermSessionId) {
-      typeIntoSession(entry.itermSessionId, transcript);
-    } else if (activeItermSessionId) {
-      typeIntoSession(activeItermSessionId, transcript);
-    }
-
-    sendResponse(socket, { id, ok: true, result: { transcript, durationMs } });
+    sendResponse(socket, { id, ok: true, result: result ?? { transcript: "" } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sendResponse(socket, { id, ok: false, error: msg });
-  } finally {
-    // Clean up the recorded audio file
-    if (audioPath) {
-      try { unlinkSync(audioPath); } catch { /* ignore */ }
-    }
   }
   socket.end();
 }
 
+// End a session — proxied to the hub for centralized session management.
 async function handleEndSessionIpc(socket: Socket, id: string, params: Record<string, unknown>): Promise<void> {
   const target = params.target != null ? String(params.target) : "";
   if (!target) {
@@ -1171,16 +1055,14 @@ async function handleEndSessionIpc(socket: Socket, id: string, params: Record<st
     socket.end();
     return;
   }
-  const session = resolveSessionTarget(target);
-  if (!session) {
-    sendResponse(socket, { id, ok: false, error: `No session matching "${target}". Use whatsapp_sessions to list.` });
+  if (!hubClient) {
+    sendResponse(socket, { id, ok: false, error: "Hub client not available" });
     socket.end();
     return;
   }
-
   try {
-    await handleEndSession(session);
-    sendResponse(socket, { id, ok: true, result: { ended: true, name: session.paiName ?? session.name } });
+    const result = await hubClient.call_raw("end_session", { target });
+    sendResponse(socket, { id, ok: true, result: result ?? { ended: true } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sendResponse(socket, { id, ok: false, error: msg });
@@ -1339,8 +1221,13 @@ function handleConnectionStatus(socket: Socket, id: string): void {
 }
 
 // IPC handler wrapper for discoverSessions.
+// Discovery is local (iTerm2 is adapter-side), but results are forwarded to the hub.
 function handleDiscover(socket: Socket, id: string): void {
   const result = discoverSessions();
+  // Forward discovered sessions to the hub (best-effort, non-blocking)
+  if (hubClient && result.discovered.length > 0) {
+    hubClient.call_raw("sessions", {}).catch(() => {});
+  }
   sendResponse(socket, { id, ok: true, result });
   socket.end();
 }
@@ -1453,13 +1340,22 @@ async function handleRequest(
         }
 
         case "voice": {
-          if (!text) {
-            sendResponse(sock, { id: reqId, ok: false, error: "payload.text is required for voice delivery" });
+          // Hub may send pre-encoded audio buffer (base64) or text for TTS
+          const voiceB64 = payload.buffer != null ? String(payload.buffer) : "";
+          if (voiceB64) {
+            // Pre-encoded audio from hub — send directly
+            const audioBuffer = Buffer.from(voiceB64, "base64");
+            await watcherSendVoiceBuffer(audioBuffer, text || undefined, recipient);
+            sendResponse(sock, { id: reqId, ok: true, result: { delivered: true, type: "voice", preEncoded: true } });
+          } else if (text) {
+            // Text → TTS → send (fallback)
+            await watcherSendVoice(text, recipient);
+            sendResponse(sock, { id: reqId, ok: true, result: { delivered: true, type: "voice" } });
+          } else {
+            sendResponse(sock, { id: reqId, ok: false, error: "payload.buffer or payload.text is required for voice delivery" });
             sock.end();
             return;
           }
-          await watcherSendVoice(text, recipient);
-          sendResponse(sock, { id: reqId, ok: true, result: { delivered: true, type: "voice" } });
           break;
         }
 
@@ -1476,6 +1372,31 @@ async function handleRequest(
           }
           await commandHandler(text, timestamp);
           sendResponse(sock, { id: reqId, ok: true, result: { delivered: true, type: "command" } });
+          break;
+        }
+
+        case "image": {
+          // Hub sends base64-encoded image buffer (e.g. screenshot)
+          const bufferB64 = payload.buffer != null ? String(payload.buffer) : "";
+          const caption = payload.text ?? payload.caption ?? "Image";
+          if (!bufferB64) {
+            sendResponse(sock, { id: reqId, ok: false, error: "payload.buffer is required for image delivery" });
+            sock.end();
+            return;
+          }
+          if (!requireConnection(sock, reqId)) return;
+
+          const imageBuffer = Buffer.from(bufferB64, "base64");
+          const imgResult = await watcherSock!.sendMessage(watcherStatus.selfJid!, {
+            image: imageBuffer,
+            caption: String(caption),
+          });
+          if (imgResult?.key?.id) {
+            const imgMsgId = imgResult.key.id;
+            sentMessageIds.add(imgMsgId);
+            setTimeout(() => sentMessageIds.delete(imgMsgId), 30_000);
+          }
+          sendResponse(sock, { id: reqId, ok: true, result: { delivered: true, type: "image" } });
           break;
         }
 
