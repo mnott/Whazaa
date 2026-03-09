@@ -10,7 +10,7 @@ One command to set up. Zero cloud dependencies for voice. Works with any WhatsAp
 
 ## How it works
 
-Whazaa is a thin **adapter plugin** for the [AIBroker](https://www.npmjs.com/package/aibroker) hub. It owns exactly one thing: the WhatsApp connection via the [Baileys](https://github.com/WhiskeySockets/Baileys) library.
+Whazaa is a thin **adapter plugin** for the [AIBroker](https://github.com/mnott/AIBroker) hub. It owns exactly one thing: the WhatsApp connection via the [Baileys](https://github.com/WhiskeySockets/Baileys) library.
 
 Everything else -- commands, session management, TTS/STT, screenshots, image generation, vision, and MCP tools -- is owned by the AIBroker hub daemon. Whazaa registers with the hub on startup via a Unix Domain Socket and heartbeats every 30 seconds. Without AIBroker running, Whazaa does not function.
 
@@ -31,7 +31,7 @@ AIBroker Hub (daemon, launchd: com.aibroker.daemon)
 
 When a WhatsApp message arrives, Whazaa forwards it to the hub over IPC. The hub handles delivery to the active Claude session (by typing into iTerm2 via AppleScript), session routing, media transcription, and all command processing. Whazaa is purely a transport layer.
 
-For more detail on hub architecture, see the [AIBroker repository](https://www.npmjs.com/package/aibroker).
+For more detail on hub architecture, see the [AIBroker repository](https://github.com/mnott/AIBroker).
 
 ---
 
@@ -65,7 +65,7 @@ Restart Claude Code. Whazaa connects automatically from now on.
 ## Prerequisites
 
 - Node.js >= 18
-- **[AIBroker](https://www.npmjs.com/package/aibroker) daemon running** (required -- Whazaa is an adapter plugin and cannot run standalone)
+- **[AIBroker](https://github.com/mnott/AIBroker) daemon running** (required -- Whazaa is an adapter plugin and cannot run standalone)
 - macOS with [iTerm2](https://iterm2.com/) for iTerm2 delivery
 - [ffmpeg](https://ffmpeg.org/) for TTS voice note conversion (WAV to OGG Opus)
 - [Whisper](https://github.com/openai/whisper) for voice note transcription (optional -- only needed to receive audio/voice messages)
@@ -540,7 +540,7 @@ The Kokoro model (~160 MB) is downloaded on first use and cached locally. Subseq
 ## Requirements
 
 - Node.js >= 18
-- [AIBroker](https://www.npmjs.com/package/aibroker) daemon (required -- installed separately)
+- [AIBroker](https://github.com/mnott/AIBroker) daemon (required -- installed separately)
 - WhatsApp account (any -- multi-device support is standard)
 - macOS with [iTerm2](https://iterm2.com/) for iTerm2 delivery
 - [ffmpeg](https://ffmpeg.org/) for TTS voice note sending (`whatsapp_tts`)
