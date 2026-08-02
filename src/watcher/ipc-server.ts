@@ -1210,6 +1210,24 @@ function handleHealth(socket: Socket, id: string): void {
   socket.end();
 }
 
+// Restart the watcher process. launchd (KeepAlive) respawns it immediately.
+// The response is flushed before exiting so the caller sees a result rather
+// than a broken pipe.
+function handleRestart(socket: Socket, id: string): void {
+  log("restart: watcher restart requested via IPC");
+  sendResponse(socket, {
+    id,
+    ok: true,
+    result: { restarting: true, pid: process.pid },
+  });
+  socket.end();
+
+  setTimeout(() => {
+    log("restart: exiting — launchd will restart us");
+    process.exit(0);
+  }, 250);
+}
+
 // Return current connection status only (MessengerAdapter.connectionStatus interface).
 function handleConnectionStatus(socket: Socket, id: string): void {
   sendResponse(socket, {
@@ -1437,6 +1455,7 @@ async function handleRequest(
     case "deliver":             return handleDeliver(socket, id, params);
     case "health":              return handleHealth(socket, id);
     case "connection_status":   return handleConnectionStatus(socket, id);
+    case "restart":             return handleRestart(socket, id);
     default:
       sendResponse(socket, { id, ok: false, error: `Unknown method: ${method}` });
       socket.end();

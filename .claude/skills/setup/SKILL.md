@@ -18,13 +18,18 @@ when a QR code scan is required.
 
 ## Context
 
-Whazaa has two components:
+Whazaa is the **WhatsApp transport adapter** for AIBroker — it is not an MCP server
+itself. Two pieces are involved:
 
-1. **MCP server** (`dist/index.js`) — a thin IPC proxy started by Claude Code. Provides
-   the `whatsapp_*` tools. Connects to the watcher over a Unix Domain Socket.
-2. **Watcher daemon** (`dist/index.js watch`) — a long-running background process that
-   owns the WhatsApp (Baileys) connection and delivers incoming messages to iTerm2 via
-   AppleScript. Managed by macOS launchd as `com.whazaa.watcher`.
+1. **AIBroker MCP server** (`npx -y -p aibroker aibroker-mcp`) — started by Claude Code.
+   Provides the `whatsapp_*` tools (plus `telegram_*`, `pailot_*`, `aibroker_*`). It
+   reaches Whazaa's watcher over a Unix Domain Socket.
+2. **Whazaa watcher daemon** (`dist/index.js watch`) — a long-running background process
+   that owns the WhatsApp (Baileys) connection and delivers incoming messages to iTerm2
+   via AppleScript. Managed by macOS launchd as `com.whazaa.watcher`.
+
+Running `dist/index.js` with no subcommand prints usage and exits — it is a CLI, not a
+stdio MCP server. Never register `whazaa` under `mcpServers`.
 
 The repo path is needed throughout. Determine it before starting:
 
@@ -111,46 +116,45 @@ If the build fails, report the compiler error to the user and stop.
 
 ## Step 4: Configure MCP
 
-Add Whazaa to `~/.claude.json` pointing to the local build. Using a local path
-(not `npx whazaa`) ensures Claude Code uses this specific build.
-
-Read the current file first to avoid clobbering existing entries:
+The MCP server to register is **AIBroker**, not Whazaa. Read the current file first to
+avoid clobbering existing entries:
 
 ```bash
 cat ~/.claude.json 2>/dev/null || echo "File does not exist"
 ```
-
-Then write the updated config. The key change from the `npx` default: use `node` +
-the absolute path to `dist/index.js`.
 
 Example config block to merge in:
 
 ```json
 {
   "mcpServers": {
-    "whazaa": {
-      "command": "node",
-      "args": ["/ABSOLUTE/PATH/TO/Whazaa/dist/index.js"]
+    "aibroker": {
+      "command": "npx",
+      "args": ["-y", "-p", "aibroker", "aibroker-mcp"]
     }
   }
 }
 ```
 
-Replace `/ABSOLUTE/PATH/TO/Whazaa` with the actual repo path.
+If AIBroker is checked out locally and you want that build instead, point at it directly:
+`"command": "node", "args": ["/ABSOLUTE/PATH/TO/AIBroker/dist/mcp/index.js"]`.
+
+Remove any leftover `whazaa` entry under `mcpServers` — Whazaa is no longer an MCP
+server and the host would launch a process that immediately exits.
 
 Verification:
 
 ```bash
-cat ~/.claude.json | python3 -c "import json,sys; d=json.load(sys.stdin); print('whazaa entry:', d.get('mcpServers',{}).get('whazaa'))"
+cat ~/.claude.json | python3 -c "import json,sys; d=json.load(sys.stdin); s=d.get('mcpServers',{}); print('aibroker entry:', s.get('aibroker')); print('stale whazaa entry:', s.get('whazaa'))"
 ```
 
-Also ensure `~/.claude/settings.json` has `"mcp__whazaa"` in the `permissions.allow` array.
-Without this, Claude Code will prompt for permission on every tool call.
+Also ensure `~/.claude/settings.json` has `"mcp__aibroker"` in the `permissions.allow`
+array. Without this, Claude Code will prompt for permission on every tool call.
 
 ```json
 {
   "permissions": {
-    "allow": ["mcp__whazaa"]
+    "allow": ["mcp__aibroker"]
   }
 }
 ```
@@ -214,7 +218,8 @@ node "$REPO/dist/index.js" setup
 
 This command:
 1. Opens the GitHub repo in your browser (informational)
-2. Detects if `~/.claude.json` already has Whazaa (skips if so)
+2. Registers the `aibroker` MCP server in `~/.claude.json` and strips any obsolete
+   `whazaa` entry
 3. Checks `~/.whazaa/auth/creds.json` — if it exists, verifies the existing session
 4. If no session or session expired: generates a QR code in the browser
 5. Waits for the phone scan and prints the connected phone number on success
@@ -234,7 +239,7 @@ without showing a QR code. In that case, skip to Step 7.
 
 Restart Claude Code is needed for the MCP config to take effect. Tell the user:
 
-> Please restart Claude Code now so the Whazaa MCP server is loaded.
+> Please restart Claude Code now so the AIBroker MCP server is loaded.
 
 After Claude Code restarts (the user returns to this session or a new one), verify:
 
@@ -257,8 +262,10 @@ whatsapp_status
 
 Expected: `Connected. Phone: +XXXXXXXXXXX`
 
-If `whatsapp_status` returns "Watcher not running", the launchd service did not load
-correctly. Run `bash "$REPO/scripts/watcher-ctl.sh" start` again and check the log.
+If `whatsapp_status` is missing entirely, the AIBroker MCP server did not load — recheck
+Step 4 and restart Claude Code. If it returns "Watcher not running", the launchd service
+did not load correctly. Run `bash "$REPO/scripts/watcher-ctl.sh" start` again and check
+the log.
 
 ---
 
@@ -302,7 +309,9 @@ messages that arrived while you were offline.
 | QR code not appearing | Check `tail -20 /tmp/whazaa-watch.log` |
 | Messages not typing into Claude | Verify iTerm2 Automation permission in System Settings > Privacy & Security > Automation |
 | TTS fails with "ffmpeg not found" | `brew install ffmpeg` |
-| MCP server disconnects repeatedly | `pkill -f "whazaa"` then let Claude Code restart it |
+| `whatsapp_*` tools missing in Claude Code | `aibroker` entry missing from `~/.claude.json` — see Step 4, then restart Claude Code |
+| MCP server disconnects repeatedly | Stale `whazaa` entry under `mcpServers` — remove it (it exits immediately by design) |
+| Watcher wedged, reports reconnecting forever | `whatsapp_restart`, or `bash scripts/watcher-ctl.sh restart` |
 | `Cannot find module 'aibroker'` | `npm install` was not run or failed — re-run Step 2 |
 | iTerm2 Automation dialog appeared | Click OK; if you clicked "Don't Allow", grant permission manually in System Settings |
 
@@ -315,7 +324,7 @@ messages that arrived while you were offline.
 - [ ] ffmpeg installed (for TTS)
 - [ ] `npm install` completed
 - [ ] `npm run build` completed — `dist/index.js` exists
-- [ ] `~/.claude.json` has `whazaa` entry pointing to local `dist/index.js`
+- [ ] `~/.claude.json` has an `aibroker` entry (and no stale `whazaa` entry)
 - [ ] Watcher launchd service loaded and running (`com.whazaa.watcher`)
 - [ ] WhatsApp session paired — `~/.whazaa/auth/creds.json` exists
 - [ ] Claude Code restarted

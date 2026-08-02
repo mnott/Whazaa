@@ -81,9 +81,15 @@ cmd_stop() {
 
 cmd_status() {
   if launchctl list "$LABEL" > /dev/null 2>&1; then
+    # `launchctl list <label>` prints a plist dict, so its first column is "{".
+    # The unfiltered listing is the tabular one: PID  STATUS  LABEL.
     local pid
-    pid=$(launchctl list "$LABEL" 2>/dev/null | head -1 | awk '{print $1}')
-    echo "Watcher: RUNNING (launchd, PID: ${pid})"
+    pid=$(launchctl list 2>/dev/null | awk -v l="$LABEL" '$3 == l { print $1 }')
+    if [ -z "$pid" ] || [ "$pid" = "-" ]; then
+      echo "Watcher: LOADED but not running (launchd will respawn it)"
+    else
+      echo "Watcher: RUNNING (launchd, PID: ${pid})"
+    fi
   else
     echo "Watcher: NOT RUNNING"
   fi

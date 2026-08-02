@@ -545,7 +545,11 @@ end tell`;
 
   if (!claudePid) {
     await watcherSendMessage("No Claude process found in that session. Restarting...").catch(() => {});
-    typeIntoSession(target.id, "claude");
+    // allowShell: the target IS a shell here — no Claude is running, which is
+    // why we are launching one. aibroker >=0.10.0 otherwise refuses writes to a
+    // session that is not at a live Claude prompt, because a shell executes
+    // whatever it is sent.
+    typeIntoSession(target.id, "claude", { allowShell: true });
     await watcherSendMessage("Restarted Claude.").catch(() => {});
     return;
   }
@@ -573,7 +577,9 @@ end tell`;
     await new Promise((r) => setTimeout(r, 1000));
   }
 
-  typeIntoSession(target.id, "claude");
+  // allowShell: /kill has just terminated Claude, so this tab is at a shell
+  // prompt by design and relaunching means writing to it. See the note above.
+  typeIntoSession(target.id, "claude", { allowShell: true });
   await new Promise((r) => setTimeout(r, 3000));
 
   const paiName = getItermSessionVar(target.id);
