@@ -58,8 +58,11 @@ export function openBrowser(url: string): void {
 
 /**
  * Run the interactive Whazaa setup wizard (`npx whazaa setup`).
- * Configures ~/.claude.json, installs the /name skill, verifies or
- * performs QR pairing, and exits.
+ * Registers the AIBroker MCP server in ~/.claude.json, installs the /name
+ * skill, verifies or performs QR pairing, and exits.
+ *
+ * Whazaa itself is not an MCP server — it is the WhatsApp transport adapter.
+ * All MCP tools are served by AIBroker.
  */
 export async function setup(): Promise<void> {
   enableSetupMode();
@@ -76,8 +79,14 @@ export async function setup(): Promise<void> {
   const mcpPath = join(homedir(), ".claude.json");
 
   interface McpConfig {
-    mcpServers?: Record<string, { command: string; args: string[] }>;
+    mcpServers?: Record<string, { command: string; args: string[]; description?: string }>;
   }
+
+  const aibrokerEntry = {
+    command: "npx",
+    args: ["-y", "-p", "aibroker", "aibroker-mcp"],
+    description: "Unified message bridge — WhatsApp, Telegram, PAILot via AIBroker hub",
+  };
 
   let config: McpConfig = {};
 
@@ -88,24 +97,31 @@ export async function setup(): Promise<void> {
       console.log("Warning: ~/.claude.json exists but could not be parsed. Overwriting.");
       config = {};
     }
-
-    if (config.mcpServers?.whazaa) {
-      console.log("Already configured in ~/.claude.json");
-    } else {
-      config.mcpServers = config.mcpServers ?? {};
-      config.mcpServers.whazaa = { command: "npx", args: ["-y", "whazaa"] };
-      writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-      console.log("Added Whazaa to ~/.claude.json");
-    }
   } else {
     mkdirSync(dirname(mcpPath), { recursive: true });
-    config = {
-      mcpServers: {
-        whazaa: { command: "npx", args: ["-y", "whazaa"] },
-      },
-    };
+  }
+
+  config.mcpServers = config.mcpServers ?? {};
+
+  // Whazaa used to be its own MCP server. It is now a transport adapter only —
+  // strip the obsolete entry so the host does not launch a stub that exits.
+  let changed = false;
+  if (config.mcpServers.whazaa) {
+    delete config.mcpServers.whazaa;
+    changed = true;
+    console.log("Removed obsolete whazaa MCP entry (Whazaa is now an adapter)");
+  }
+
+  if (config.mcpServers.aibroker) {
+    console.log("AIBroker MCP server already configured in ~/.claude.json");
+  } else {
+    config.mcpServers.aibroker = aibrokerEntry;
+    changed = true;
+    console.log("Added AIBroker MCP server to ~/.claude.json");
+  }
+
+  if (changed) {
     writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-    console.log("Created ~/.claude.json with Whazaa");
   }
 
   // ------------------------------------------------------------------
@@ -126,7 +142,7 @@ export async function setup(): Promise<void> {
       "",
       "# Name — Session Renaming",
       "",
-      "Rename the current session using the Whazaa `whatsapp_rename` MCP tool.",
+      "Rename the current session using the AIBroker `aibroker_rename` MCP tool.",
       "",
       "## Usage",
       "",
@@ -136,7 +152,7 @@ export async function setup(): Promise<void> {
       "",
       "## Instructions",
       "",
-      "When this skill is invoked with arguments, immediately call `whatsapp_rename` with the argument as the name. No confirmation needed. Report the result.",
+      "When this skill is invoked with arguments, immediately call `aibroker_rename` with the argument as the name. No confirmation needed. Report the result.",
       "",
       "If no argument is provided, ask what name to use.",
       "",
@@ -229,9 +245,10 @@ export async function uninstall(): Promise<void> {
       if (config.mcpServers?.whazaa) {
         delete config.mcpServers.whazaa;
         writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
-        console.log("Removed Whazaa from ~/.claude.json");
-      } else {
-        console.log("Whazaa not found in ~/.claude.json");
+        console.log("Removed legacy whazaa MCP entry from ~/.claude.json");
+      }
+      if (config.mcpServers?.aibroker) {
+        console.log("Left AIBroker MCP server in place (it also serves Telegram/PAILot)");
       }
     } catch {
       console.log("Warning: could not parse ~/.claude.json");

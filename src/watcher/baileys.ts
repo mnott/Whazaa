@@ -116,8 +116,61 @@ export async function connectWatcher(
   let connectionReplacedCount = 0;
   let permanentlyLoggedOut = false;
   let stopped = false;
+  let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   const MAX_RECONNECT_DELAY_MS = 60_000;
+  const VERSION_FETCH_TIMEOUT_MS = 20_000;
+
+  // The reconnect loop can wedge silently: if the reconnect timer fires and the
+  // work inside openSocket() never settles (a hung version fetch, a half-open
+  // socket that emits neither "open" nor "close"), nothing schedules another
+  // attempt and nothing is logged. The process stays alive and reports
+  // "reconnecting" forever — observed once for ~40 hours.
+  //
+  // The watchdog is the backstop: if we do not reach "open" within this window,
+  // exit non-zero and let launchd respawn a clean process. Set
+  // WHAZAA_WATCHDOG_MS=0 to disable.
+  const WATCHDOG_MS = (() => {
+    const raw = process.env.WHAZAA_WATCHDOG_MS;
+    if (raw === undefined) return 5 * 60_000;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 5 * 60_000;
+  })();
+
+  function disarmWatchdog(): void {
+    if (watchdogTimer) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
+  }
+
+  /**
+   * Arm the disconnected-state watchdog.
+   *
+   * No-op while shutting down, while a QR pairing is in flight, or after a
+   * permanent logout — those states are legitimately not-connected and a
+   * respawn would not help (and would crash-loop).
+   */
+  function armWatchdog(): void {
+    if (WATCHDOG_MS === 0 || stopped || permanentlyLoggedOut) return;
+    disarmWatchdog();
+
+    watchdogTimer = setTimeout(() => {
+      watchdogTimer = null;
+      if (stopped || permanentlyLoggedOut || watcherStatus.awaitingQR) return;
+      if (watcherStatus.connected) return;
+
+      log(
+        `WATCHDOG: still not connected ${WATCHDOG_MS / 1_000}s after losing the connection ` +
+        `(${reconnectAttempts} reconnect attempts, pending timer: ${reconnectTimer !== null}). ` +
+        "Exiting so launchd respawns a clean watcher."
+      );
+      process.exit(1);
+    }, WATCHDOG_MS);
+
+    // Never hold the event loop open just for the watchdog.
+    watchdogTimer.unref?.();
+  }
 
   /**
    * Schedule a reconnection attempt using exponential backoff.
@@ -141,7 +194,10 @@ export async function connectWatcher(
       reconnectTimer = null;
       if (!stopped) {
         openSocket().catch((err) => {
+          // A failed attempt must not end the loop — without this the watcher
+          // logs one error and then sits disconnected forever.
           log(`Reconnect error: ${err}`);
+          scheduleReconnect();
         });
       }
     }, delay);
@@ -163,14 +219,25 @@ export async function connectWatcher(
    */
   async function openSocket(): Promise<void> {
     const { state: authState, saveCreds } = await useMultiFileAuthState(authDir);
-    const { version } = await fetchLatestBaileysVersion();
+
+    // fetchLatestBaileysVersion() is an unbounded network call. If it hangs,
+    // openSocket() never settles and the reconnect loop dies silently — so cap
+    // it and fall back to the version bundled with Baileys.
+    const version = await Promise.race([
+      fetchLatestBaileysVersion().then(({ version: v }) => v),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), VERSION_FETCH_TIMEOUT_MS)),
+    ]).catch(() => undefined);
+
+    if (!version) {
+      log("Could not fetch latest WhatsApp version in time — using bundled version.");
+    }
 
     sock = makeWASocket({
       auth: {
         creds: authState.creds,
         keys: makeCacheableSignalKeyStore(authState.keys, logger),
       },
-      version,
+      ...(version ? { version } : {}),
       browser: ["Whazaa", "cli", "0.1.0"],
       printQRInTerminal: false,
       syncFullHistory: false,
@@ -292,6 +359,7 @@ export async function connectWatcher(
         connStatus.connected = true;
         reconnectAttempts = 0;
         connectionReplacedCount = 0;
+        disarmWatchdog();
 
         const jid = sock?.user?.id ?? null;
         if (jid) {
@@ -325,6 +393,7 @@ export async function connectWatcher(
         stopTypingIndicator();
         setWatcherSock(null);
         sock = null;
+        armWatchdog();
 
         const statusCode =
           (lastDisconnect?.error as { output?: { statusCode?: number } })?.output
@@ -332,6 +401,7 @@ export async function connectWatcher(
 
         if (statusCode === DisconnectReason.loggedOut) {
           permanentlyLoggedOut = true;
+          disarmWatchdog(); // a respawn cannot fix this — re-pairing is manual
           log("Logged out (401). Run 'npx whazaa setup' to re-pair.");
           return;
         }
@@ -339,6 +409,9 @@ export async function connectWatcher(
         if (statusCode === DisconnectReason.connectionReplaced) {
           connectionReplacedCount++;
           if (connectionReplacedCount >= 3) {
+            // Deliberate give-up, already logged loudly — respawning would just
+            // resume fighting the other instance for the session.
+            disarmWatchdog();
             log(
               "Connection replaced (440) 3 times — another instance holds the session. " +
               "Stopping reconnection. Use whatsapp_restart to recover."
@@ -599,6 +672,7 @@ export async function connectWatcher(
    */
   function cleanup(): void {
     stopped = true;
+    disarmWatchdog();
 
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
