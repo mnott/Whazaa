@@ -57,7 +57,7 @@ import { createServer, Socket, Server } from "node:net";
 import { proto } from "@whiskeysockets/baileys";
 
 import { IPC_SOCKET_PATH } from "../ipc-client.js";
-import { listChats } from "../desktop-db.js";
+import { listChats, getMessages } from "../desktop-db.js";
 
 import {
   sessionRegistry,
@@ -772,10 +772,54 @@ async function handleHistory(
   const stored = messageStore.get(normalizedJid) ?? [];
 
   if (stored.length === 0) {
+    // No Baileys anchor (chat dormant since watcher start) — fall back to the
+    // WhatsApp Desktop DB, which holds the full local history for such chats.
+    // Newer Desktop DBs key chats by LID JID, so also try the contact's LID.
+    const lid = (contactStore.get(normalizedJid) as { lid?: string } | undefined)?.lid;
+    let desktopMsgs = getMessages(normalizedJid, count);
+    if (desktopMsgs !== null && desktopMsgs.length === 0 && lid) {
+      desktopMsgs = getMessages(lid, count);
+    }
+    if (desktopMsgs !== null && desktopMsgs.length > 0) {
+      const partnerName = contactStore.get(normalizedJid)?.name ?? null;
+      // Resolve a sender JID (phone or LID form) to a contact name.
+      const nameForJid = (j: string | null): string | null => {
+        if (!j) return null;
+        const direct = contactStore.get(j)?.name;
+        if (direct) return direct;
+        for (const c of contactStore.values()) {
+          if ((c as { lid?: string }).lid === j && c.name) return c.name;
+        }
+        return null;
+      };
+      sendResponse(socket, {
+        id,
+        ok: true,
+        result: {
+          messages: desktopMsgs.map((m) => ({
+            id: m.id,
+            fromMe: m.fromMe,
+            timestamp: m.timestamp,
+            date: m.date,
+            text: m.text,
+            type: m.type,
+            pushName: m.fromMe
+              ? null
+              : m.pushName ?? nameForJid(m.fromJid) ?? partnerName,
+          })) as unknown as Record<string, unknown>[],
+          count: desktopMsgs.length,
+          source: "desktop-db",
+        },
+      });
+      socket.end();
+      return;
+    }
     sendResponse(socket, {
       id,
       ok: false,
-      error: "No anchor message found for this chat. Send or receive a message first to create an anchor.",
+      error: desktopMsgs === null
+        ? "No history available: this chat has had no activity since the watcher started, and the WhatsApp Desktop database is not present to read older messages."
+        : "No history available: this chat has had no activity since the watcher started and was not found in the WhatsApp Desktop database. Verify the JID with whatsapp_chats.",
     });
     socket.end();
     return;
