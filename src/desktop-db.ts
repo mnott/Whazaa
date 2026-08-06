@@ -188,6 +188,12 @@ export function getMessages(jid: string, limit?: number): DesktopMessage[] | nul
     return rows
       .map((r): DesktopMessage => {
         const ts = r.msgDate != null ? r.msgDate + APPLE_EPOCH_OFFSET : 0;
+        // Recent Desktop versions store a base64 protobuf blob in ZPUSHNAME
+        // instead of a display name — treat those as absent.
+        const pushName =
+          r.pushName && !/^[A-Za-z0-9+/]{20,}={0,2}$/.test(r.pushName)
+            ? r.pushName
+            : null;
         return {
           id: r.id ?? "",
           fromMe: r.fromMe === 1,
@@ -196,7 +202,7 @@ export function getMessages(jid: string, limit?: number): DesktopMessage[] | nul
           text: r.text ?? "[non-text message]",
           fromJid: r.fromJid ?? null,
           toJid: r.toJid ?? null,
-          pushName: r.pushName ?? null,
+          pushName,
           type: r.msgType === 0 ? "text" : (r.text ? "text" : "other"),
         };
       })
