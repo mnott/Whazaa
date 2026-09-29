@@ -22,6 +22,7 @@ import { startIpcServer } from "./ipc-server.js";
 import { createMessageHandler } from "./commands.js";
 import { setAppDir, loadSessionRegistry } from "./persistence.js";
 import { log, setLogPrefix } from "./log.js";
+import { installConsoleGuard } from "./console-guard.js";
 import { WatcherClient, DAEMON_SOCKET_PATH, createBrokerMessage } from "aibroker";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -83,6 +84,7 @@ function isLocalSlashCommand(text: string): boolean {
  * 4. Handles /restart and /login locally
  */
 export async function watch(rawSessionId?: string): Promise<void> {
+  installConsoleGuard();
   setLogPrefix("whazaa-watch");
   setAppDir(join(homedir(), ".whazaa"));
 

@@ -68,6 +68,36 @@ export let watcherStatus = {
   awaitingQR: false,
 };
 
+// Last jid a self-chat message arrived on. WhatsApp's LID migration delivers
+// self messages under <id>@lid; replies to the phone-number jid do not show up
+// in the phone's self-chat, so replies must go back to the jid the chat uses.
+let lastSelfChatJid: string | null = null;
+
+const stripDevice = (jid: string): string => jid.replace(/:\d+@/, "@");
+
+export function noteSelfChatJid(jid: string): void {
+  lastSelfChatJid = stripDevice(jid);
+}
+
+/** Single resolver for the default self-chat send target: last incoming jid, else own LID, else PN jid. */
+export function selfChatJid(): string {
+  if (lastSelfChatJid) return lastSelfChatJid;
+  const { selfLid, selfJid } = watcherStatus;
+  return selfLid ? stripDevice(selfLid) : (selfJid ?? "");
+}
+
+/** True when jid is any alias (PN or LID) of the self-chat. */
+export function isSelfChatJid(jid: string): boolean {
+  const j = stripDevice(jid);
+  const { selfLid, selfJid } = watcherStatus;
+  return j === lastSelfChatJid || (!!selfJid && j === stripDevice(selfJid)) || (!!selfLid && j === stripDevice(selfLid));
+}
+
+/** Test hook. */
+export function resetSelfChatJid(): void {
+  lastSelfChatJid = null;
+}
+
 export function setWatcherStatus(status: typeof watcherStatus): void {
   watcherStatus = status;
 }

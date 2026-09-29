@@ -81,6 +81,8 @@ import {
   updateSessionTtyCache,
   commandHandler,
   adapterStats,
+  selfChatJid,
+  isSelfChatJid,
 } from "./state.js";
 import {
   resolveJid,
@@ -363,7 +365,7 @@ async function handleSend(
 
   try {
     const preview = await watcherSendMessage(message, recipient);
-    const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+    const targetJid = recipient ? resolveRecipient(recipient) : selfChatJid();
     sendResponse(socket, { id, ok: true, result: { preview, targetJid } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -398,7 +400,7 @@ async function handleSendFile(
   const fileRecipient = params.recipient != null ? String(params.recipient) : undefined;
   const fileCaption = params.caption != null ? String(params.caption) : undefined;
   const prettify = params.prettify === true;
-  const targetJidFile = fileRecipient ? resolveRecipient(fileRecipient) : watcherStatus.selfJid!;
+  const targetJidFile = fileRecipient ? resolveRecipient(fileRecipient) : selfChatJid();
 
   // Prettify mode: convert text/markdown files to WhatsApp-formatted messages
   const fileName = basename(filePath);
@@ -439,7 +441,7 @@ async function handleSendFile(
         }
       }
 
-      if (targetJidFile !== watcherStatus.selfJid) {
+      if (!isSelfChatJid(targetJidFile)) {
         trackContact(targetJidFile, null, Date.now());
       }
 
@@ -481,7 +483,7 @@ async function handleSendFile(
     }
 
     // Track outbound contact (non-self only)
-    if (targetJidFile !== watcherStatus.selfJid) {
+    if (!isSelfChatJid(targetJidFile)) {
       trackContact(targetJidFile, null, Date.now());
     }
 
@@ -1449,7 +1451,7 @@ async function handleRequest(
           if (!requireConnection(sock, reqId)) return;
 
           const imageBuffer = Buffer.from(bufferB64, "base64");
-          const imgResult = await watcherSock!.sendMessage(watcherStatus.selfJid!, {
+          const imgResult = await watcherSock!.sendMessage(selfChatJid(), {
             image: imageBuffer,
             caption: String(caption),
           });

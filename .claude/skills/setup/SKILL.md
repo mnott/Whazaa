@@ -190,7 +190,7 @@ Expected output: `Watcher: RUNNING (launchd, PID: XXXXX)`
 If the watcher is not running after `start`, check the log:
 
 ```bash
-tail -20 /tmp/whazaa-watch.log
+tail -20 ~/Library/Logs/whazaa/watch.log
 ```
 
 Common causes of failure at this stage:
@@ -248,7 +248,7 @@ After Claude Code restarts (the user returns to this session or a new one), veri
 bash "$REPO/scripts/watcher-ctl.sh" status
 
 # Watcher log shows connection
-tail -5 /tmp/whazaa-watch.log
+tail -5 ~/Library/Logs/whazaa/watch.log
 
 # Auth credentials exist
 ls -la ~/.whazaa/auth/creds.json
@@ -306,7 +306,7 @@ messages that arrived while you were offline.
 |---------|-----|
 | `Tools return "Watcher not running"` | `bash scripts/watcher-ctl.sh start` |
 | `Logged out (401)` | `node dist/index.js setup` to re-pair |
-| QR code not appearing | Check `tail -20 /tmp/whazaa-watch.log` |
+| QR code not appearing | Check `tail -20 ~/Library/Logs/whazaa/watch.log` |
 | Messages not typing into Claude | Verify iTerm2 Automation permission in System Settings > Privacy & Security > Automation |
 | TTS fails with "ffmpeg not found" | `brew install ffmpeg` |
 | `whatsapp_*` tools missing in Claude Code | `aibroker` entry missing from `~/.claude.json` — see Step 4, then restart Claude Code |

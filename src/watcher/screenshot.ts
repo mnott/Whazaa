@@ -41,6 +41,7 @@ import {
   watcherSock,
   watcherStatus,
   sentMessageIds,
+  selfChatJid,
 } from "./state.js";
 import { watcherSendMessage } from "./send.js";
 import { listClaudeSessions } from "./iterm-sessions.js";
@@ -54,6 +55,7 @@ let lastScreenshotContent: string | null = null;
  * Returns null if no session is found or the read fails.
  */
 function getActiveSessionContent(): string | null {
+  if (process.platform !== "darwin") return null; // iTerm2 + osascript are macOS-only
   const activeEntry = activeClientId ? sessionRegistry.get(activeClientId) : undefined;
   const itermId = stripItermPrefix(
     (activeItermSessionId || undefined) ?? activeEntry?.itermSessionId
@@ -477,7 +479,7 @@ end tell`;
         throw new Error("Self JID not yet known.");
       }
 
-      const result = await watcherSock.sendMessage(watcherStatus.selfJid, {
+      const result = await watcherSock.sendMessage(selfChatJid(), {
         image: buffer,
         caption: "Screenshot",
       });

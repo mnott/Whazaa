@@ -54,6 +54,7 @@ import {
   sentMessageIds,
   enqueueContactMessage,
   adapterStats,
+  noteSelfChatJid,
 } from "./state.js";
 import { loadStoreCache, saveStoreCache } from "./persistence.js";
 import { stopTypingIndicator } from "./typing.js";
@@ -495,6 +496,7 @@ export async function connectWatcher(
         }
 
         if (isSelfChat) {
+          noteSelfChatJid(remoteJid);
           if (isImage) {
             // Download image to temp file, then deliver path (+ optional caption) to iTerm2
             const caption =

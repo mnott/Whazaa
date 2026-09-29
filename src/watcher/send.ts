@@ -18,7 +18,7 @@
  * Dependencies: state.ts, contacts.ts, typing.ts.
  */
 
-import { watcherSock, watcherStatus, sentMessageIds, messageSource, adapterStats } from "./state.js";
+import { watcherSock, watcherStatus, selfChatJid, isSelfChatJid, sentMessageIds, messageSource, adapterStats } from "./state.js";
 import { resolveRecipient, markdownToWhatsApp, trackContact } from "./contacts.js";
 import { stopTypingIndicator } from "./typing.js";
 import { textToVoiceNote } from "../tts.js";
@@ -50,10 +50,10 @@ export async function watcherSendMessage(
     throw new Error("Self JID not yet known. Wait for connection to fully open.");
   }
 
-  const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+  const targetJid = recipient ? resolveRecipient(recipient) : selfChatJid();
 
   // Broadcast to PAILot only when NOT originating from WhatsApp (channel isolation)
-  if ((options?.broadcast ?? true) && messageSource !== "whatsapp" && targetJid === watcherStatus.selfJid) {
+  if ((options?.broadcast ?? true) && messageSource !== "whatsapp" && isSelfChatJid(targetJid)) {
     broadcastText(message);
   }
 
@@ -98,9 +98,9 @@ export async function watcherSendVoiceBuffer(
   if (!watcherStatus.connected) throw new Error("WhatsApp is not connected.");
   if (!watcherStatus.selfJid) throw new Error("Self JID not yet known.");
 
-  const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid;
+  const targetJid = recipient ? resolveRecipient(recipient) : selfChatJid();
 
-  if (messageSource !== "whatsapp" && targetJid === watcherStatus.selfJid) {
+  if (messageSource !== "whatsapp" && isSelfChatJid(targetJid)) {
     broadcastVoice(buffer, transcript ?? "");
   }
 
@@ -127,7 +127,7 @@ export async function watcherSendVoice(text: string, recipient?: string): Promis
     if (!watcherStatus.selfJid) throw new Error("Self JID not yet known.");
   }
 
-  const targetJid = recipient ? resolveRecipient(recipient) : watcherStatus.selfJid!;
+  const targetJid = recipient ? resolveRecipient(recipient) : selfChatJid();
   const voice = loadVoiceConfig().defaultVoice;
   const chunks = splitIntoChunks(text);
 
@@ -141,7 +141,7 @@ export async function watcherSendVoice(text: string, recipient?: string): Promis
       continue;
     }
 
-    if (messageSource !== "whatsapp" && targetJid === watcherStatus.selfJid) {
+    if (messageSource !== "whatsapp" && isSelfChatJid(targetJid)) {
       broadcastVoice(audioBuffer, chunks[i]);
     }
 

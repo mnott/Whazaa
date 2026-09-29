@@ -1,6 +1,6 @@
 {
   "name": "whazaa",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "WhatsApp MCP server for Claude Code — talk to Claude from your phone via WhatsApp self-chat",
   "type": "module",
   "main": "dist/index.js",
@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "scripts/watcher-ctl.sh",
     "README.md",
     "LICENSE"
   ],
@@ -40,8 +41,8 @@
   "dependencies": {
     "@types/ws": "^8.18.1",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
-    "aibroker": "^0.19.0",
-    "better-sqlite3": "^12.6.2",
+    "aibroker": "^0.61.0",
+    "better-sqlite3": "^12.11.1",
     "kokoro-js": "^1.2.1",
     "pino": "^9.0.0",
     "qrcode": "^1.5.4",
