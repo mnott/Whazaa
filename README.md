@@ -23,8 +23,11 @@ Tell Claude Code:
 Or, without cloning:
 
 ```bash
-npx -y whazaa setup      # verify AIBroker, register the service, show a QR code
+npm i -g https://github.com/mnott/Whazaa/releases/latest/download/whazaa.tgz
+whazaa setup             # verify AIBroker, register the service, show a QR code
 ```
+
+Update: `pai update --package whazaa`. The npm registry is no longer updated; releases come from GitHub.
 
 Scan the QR code with WhatsApp (Settings > Linked Devices > Link a Device), then restart Claude Code. Whazaa connects automatically from now on.
 
