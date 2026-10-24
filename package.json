@@ -41,7 +41,7 @@
   "dependencies": {
     "@types/ws": "^8.18.1",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
-    "aibroker": "^0.61.0",
+    "aibroker": "https://github.com/mnott/AIBroker/releases/download/v0.62.5/aibroker-0.62.5.tgz",
     "better-sqlite3": "^12.11.1",
     "kokoro-js": "^1.2.1",
     "pino": "^9.0.0",
